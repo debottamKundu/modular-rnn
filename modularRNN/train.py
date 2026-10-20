@@ -12,6 +12,7 @@ from model import ModularCTRNN
 from env import ClosedLoopEnv
 from generators import SessionPlanGenerator
 from losses import compute_losses
+from modularRNN.congruency import congruency_accuracy_scalars
 from storage import HiddenStateStore
 from utils import get_run_id, set_seed, spectral_radius
 from eval import (
@@ -230,6 +231,7 @@ def main(cfg: Config):
             repeat_rate = (
                 (all_choice[has_prev] == prev_cat[has_prev]).float().mean().item()
             )
+        congr_scalars = congruency_accuracy_scalars(results, cfg.env.contrasts)
 
         if cfg.training.use_wandb:
             wandb.log(
@@ -250,6 +252,7 @@ def main(cfg: Config):
                     "diag/W_vv_specrad": spectral_radius(model.W_vv),
                     "diag/W_mm_specrad": spectral_radius(model.W_mm),
                     "step": step,
+                    "congruency": congr_scalars,
                 }
             )
         else:
