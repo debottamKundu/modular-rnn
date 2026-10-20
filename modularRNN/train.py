@@ -12,7 +12,7 @@ from model import ModularCTRNN
 from env import ClosedLoopEnv
 from generators import SessionPlanGenerator
 from losses import compute_losses
-from modularRNN.congruency import congruency_accuracy_scalars
+from congruency import congruency_accuracy_scalars
 from storage import HiddenStateStore
 from utils import get_run_id, set_seed, spectral_radius
 from eval import (
@@ -100,8 +100,7 @@ def main(cfg: Config):
         plan_gen=plan_gen,
         batch_size=cfg.env.batch_size,
         device=device,
-        T_stim=cfg.env.T_stim,
-        T_resp=cfg.env.T_resp,
+        T_max=cfg.env.T_max,
         T_iti=cfg.env.T_iti,
         t_min=cfg.decision.t_min,
         theta=cfg.decision.theta,

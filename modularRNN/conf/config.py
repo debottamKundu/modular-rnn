@@ -9,7 +9,7 @@ class ModelConfig:
     n_visp: int = 64
     n_mos: int = 64
     n_stim: int = 2
-    n_fb: int = 1
+    n_fb: int = 1  # 1 for reward only, 2 for reward+kernel
     rank_ff: int = 5
     dt: float = 10.0
     tau_visp_range: List[float] = field(default_factory=lambda: [20.0, 60.0])
@@ -26,15 +26,14 @@ class ModelConfig:
 @dataclass
 class DecisionConfig:
     t_min: int = 10
-    theta: float = 0.9  # QUE: Is this the decision threshold?
+    theta: float = 0.9
 
 
 @dataclass
 class EnvConfig:
     batch_size: int = 32
-    T_stim: int = 50
-    T_resp: int = 80
-    T_iti: int = 20
+    T_max: int = 100
+    T_iti: int = 3
     sigma_stim: float = 1.0  # stimulus noise amplitude
     hold_fb_during_stim: bool = False
     n_blocks: int = 5  # total blocks/session

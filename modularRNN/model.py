@@ -37,15 +37,12 @@ class ModularCTRNN(nn.Module):
 
         tau_v = torch.empty(n_visp).uniform_(*tau_visp_range)
         tau_m = torch.empty(n_mos).uniform_(*tau_mos_range)
-        log_tau_init = torch.log(
-            torch.cat([tau_v, tau_m])
-        )  # QUE: Why use log of time constant?
+        log_tau_init = torch.log(torch.cat([tau_v, tau_m]))
         if learnable_tau:
             self.log_tau = nn.Parameter(log_tau_init)
         else:
             self.register_buffer("log_tau", log_tau_init)
 
-        # QUE: What are these gains doing? rec, ff and fb?
         self.W_vv = nn.Parameter(
             rec_gain * torch.randn(n_visp, n_visp) / math.sqrt(n_visp)
         )
@@ -67,7 +64,7 @@ class ModularCTRNN(nn.Module):
         )
 
         # input weights: hard block structure -- stim -> VISp only
-        # QUE: Is this feedback the previous feedback input?
+
         self.W_in_stim_visp = nn.Parameter(
             in_gain * torch.randn(n_visp, n_stim) / math.sqrt(n_stim)
         )

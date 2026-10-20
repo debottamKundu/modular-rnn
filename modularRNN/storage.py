@@ -43,6 +43,7 @@ class HiddenStateStore:
         "timed_out",
         "prev_model_choice",
         "has_prev_choice",
+        "action_kernel",
     ]
 
     def __init__(
@@ -84,6 +85,7 @@ class HiddenStateStore:
             "timed_out": result.timed_out.cpu().numpy().astype("f4"),
             "prev_model_choice": result.prev_model_choice.cpu().numpy().astype("f4"),
             "has_prev_choice": result.has_prev_choice.cpu().numpy().astype("f4"),
+            "action_kernel": result.action_kernel.cpu().numpy().astype("f4"),
         }
         for col, arr in scalars.items():
             _append_along_axis(self.store[col], arr, axis=0)
