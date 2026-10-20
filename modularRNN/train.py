@@ -80,8 +80,8 @@ def main(cfg: Config):
     #     model = torch.compile(model)
 
     if cfg.training.compile_model and device.type == "cuda":
-        model.step = torch.compile(model.step, mode="reduce-overhead")
-        model.readout = torch.compile(model.readout, mode="reduce-overhead")
+        model.step = torch.compile(model.step)  # , mode="reduce-overhead")
+        model.readout = torch.compile(model.readout)  # , mode="reduce-overhead")
 
     plan_gen = SessionPlanGenerator(
         n_blocks=cfg.env.n_blocks,
