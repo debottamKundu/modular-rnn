@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - override /paths: server
+
+training:
+  device: cuda
+  compile_model: true
+  use_wandb: true
+
+env:
+  batch_size: 256
+  eval_batch_size: 128

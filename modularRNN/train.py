@@ -44,6 +44,16 @@ def main(cfg: Config):
     set_seed(cfg.training.seed)
     device = torch.device(cfg.training.device)
 
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Config requested training.device=cuda, but torch.cuda.is_available() "
+                "is False. Check CUDA drivers / PyTorch CUDA build before proceeding."
+            )
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        torch.set_float32_matmul_precision("high")
+
     os.makedirs(cfg.paths.checkpoint_dir, exist_ok=True)
     os.makedirs(cfg.paths.data_dir, exist_ok=True)
     os.makedirs(cfg.paths.wandb_dir, exist_ok=True)
@@ -66,8 +76,12 @@ def main(cfg: Config):
         nonlinearity=cfg.model.nonlinearity,
     ).to(device)
 
-    if cfg.training.compile_model and device.type != "mps":
-        model = torch.compile(model)
+    # if cfg.training.compile_model and device.type != "mps":
+    #     model = torch.compile(model)
+
+    if cfg.training.compile_model and device.type == "cuda":
+        model.step = torch.compile(model.step, mode="reduce-overhead")
+        model.readout = torch.compile(model.readout, mode="reduce-overhead")
 
     plan_gen = SessionPlanGenerator(
         n_blocks=cfg.env.n_blocks,
@@ -247,8 +261,6 @@ def main(cfg: Config):
                 f"no_resp={no_resp:.3f} repeat={repeat_rate if repeat_rate is None else round(repeat_rate,3)} "
                 f"| grad_norm={grad_norm.item():.3f}"
             )
-
-
 
         # this ensures local training runs are never saved.
         if cfg.training.use_wandb and step % cfg.training.ckpt_every == 0:
