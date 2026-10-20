@@ -1,0 +1,4 @@
+defaults:
+  - base_config
+  - paths: local
+  - _self_
