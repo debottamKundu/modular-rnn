@@ -97,9 +97,9 @@ class LocalPaths(PathsConfig):
 
 @dataclass
 class ServerPaths(PathsConfig):
-    checkpoint_dir: str = "/data/${oc.env:USER}/modular_rnn/model/checkpoints"
-    data_dir: str = "/data/${oc.env:USER}/modular_rnn/data"
-    wandb_dir: str = "/data/${oc.env:USER}/modular_rnn/wandb"
+    checkpoint_dir: str = "/usr/people/kundu/code/modular_rnn/model/checkpoints"
+    data_dir: str = "/usr/people/kundu/code/modular_rnn/data"
+    wandb_dir: str = "/usr/people/kundu/code/modular_rnn/wandb"
 
 
 @dataclass
