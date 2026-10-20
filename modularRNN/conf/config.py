@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List
 from hydra.core.config_store import ConfigStore
+from omegaconf import MISSING
 
 
 @dataclass
@@ -108,7 +109,8 @@ class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
-    paths: PathsConfig = field(default_factory=LocalPaths)
+    # paths: PathsConfig = field(default_factory=LocalPaths)
+    paths: PathsConfig = MISSING
 
 
 cs = ConfigStore.instance()

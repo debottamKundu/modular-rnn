@@ -52,3 +52,16 @@ for _ in range(10):
 
 print(store.store["full_r_v"].shape)
 print(store.store["session_id"][:])
+
+
+"""
+command:
+python modularRNN/train.py experiment=server_run \
+  model.n_visp=64 model.n_mos=64 model.rank_ff=3 \
+  env.n_blocks=5 env.n_unbiased_blocks=1 \
+  env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
+  env.contrasts="[0.0,0.0625,0.125,0.25,1.0]" \
+  training.n_steps=50000 \
+  training.k_start=4 training.k_max=60 training.k_growth_every=500 \
+  training.eval_every=200 training.probe_every=1000 training.ckpt_every=1000
+  """
