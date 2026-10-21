@@ -4,30 +4,40 @@ import tempfile
 import hydra
 from matplotlib import pyplot as plt
 import torch
+
+torch.autograd.set_detect_anomaly(True)
 import wandb
 from omegaconf import DictConfig, OmegaConf
 
 from conf.config import Config
 from model import ModularCTRNN
-from env import ClosedLoopEnv
+from env import AsyncClosedLoopEnv
 from generators import SessionPlanGenerator
 from losses import compute_losses
 from congruency import congruency_accuracy_scalars
 from storage import HiddenStateStore
 from utils import get_run_id, set_seed, spectral_radius
-from eval import (
-    make_eval_env,
-    collect_eval_rollout,
-    fit_psychometric,
-    plot_rt_histogram,
-    run_probe_decoding,
-    plot_probe_decoding,
-)
+
+# from eval import (
+#     make_eval_env,
+#     collect_eval_rollout,
+#     fit_psychometric,
+#     plot_rt_histogram,
+#     run_probe_decoding,
+#     plot_probe_decoding,
+# )
 
 
 def k_schedule(step, cfg):
     return min(
         cfg.training.k_start + step // cfg.training.k_growth_every, cfg.training.k_max
+    )
+
+
+def chunk_dt_schedule(step, cfg):
+    return min(
+        cfg.training.chunk_dt_start + step // cfg.training.chunk_dt_growth_every,
+        cfg.training.chunk_dt_max,
     )
 
 
@@ -95,7 +105,7 @@ def main(cfg: Config):
         device=device,
     )
 
-    env = ClosedLoopEnv(
+    env = AsyncClosedLoopEnv(
         model=model,
         plan_gen=plan_gen,
         batch_size=cfg.env.batch_size,
@@ -118,7 +128,7 @@ def main(cfg: Config):
             config=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
         )
         wandb.watch(model, log="gradients", log_freq=200)  # type: ignore
-        run_id = get_run_id(cfg.training.use_wandb)
+    run_id = get_run_id(cfg.training.use_wandb)
 
     if cfg.training.use_wandb:
         run_ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, run_id)
@@ -137,26 +147,27 @@ def main(cfg: Config):
     os.makedirs(run_ckpt_dir, exist_ok=True)
     os.makedirs(run_data_dir, exist_ok=True)
 
-    hidden_store = None
-    if cfg.training.store_hidden_during_training:
-        hidden_store = HiddenStateStore(
-            os.path.join(run_data_dir, "hidden_states_train.zarr"),
-            cfg.model.n_visp,
-            cfg.model.n_mos,
-            cfg.model.n_stim,
-            store_full_traces=True,
-        )
+    # hidden_store = None
+    # if cfg.training.store_hidden_during_training:
+    #     hidden_store = HiddenStateStore(
+    #         os.path.join(run_data_dir, "hidden_states_train.zarr"),
+    #         cfg.model.n_visp,
+    #         cfg.model.n_mos,
+    #         cfg.model.n_stim,
+    #         store_full_traces=True,
+    #     )
 
     env.reset()
 
-    eval_env = make_eval_env(
-        model, plan_gen, cfg.env.eval_batch_size, device, cfg.env, cfg.decision
-    )
+    # eval_env = make_eval_env(
+    #     model, plan_gen, cfg.env.eval_batch_size, device, cfg.env, cfg.decision
+    # )
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_opt_state = copy.deepcopy(optimizer.state_dict())
 
     for step in range(cfg.training.n_steps):
-        K = k_schedule(step, cfg)
+
+        chunk_len = chunk_dt_schedule(step, cfg)
         tf_prob = anneal(
             step,
             cfg.training.n_steps,
@@ -166,17 +177,24 @@ def main(cfg: Config):
         )
 
         results, rate_terms = [], []
-        for _ in range(K):
-            store_this = (
-                cfg.training.store_hidden_during_training and hidden_store is not None
-            )
-            res = env.run_trial(
-                teacher_forcing_prob=tf_prob, store_full_trace=store_this
-            )
-            results.append(res)
+        for _ in range(chunk_len):
+            res = env.step_dt(teacher_forcing_prob=tf_prob)
+            if res is not None:
+                results.append(res)
             rate_terms.append((model.phi(env.h) ** 2).mean())
-            if store_this:
-                hidden_store.append(res, training_step=step)  # type: ignore
+
+        assert env.h is not None
+        # env.h = env.h.detach()  # truncated BPTT boundary
+        env.detach_state()
+
+        if len(results) == 0:
+            if cfg.training.use_wandb:
+                wandb.log({"train/empty_chunk": 1, "step": step})
+            else:
+                print(
+                    f"step {step:5d} | chunk_len={chunk_len} | no trials resolved this chunk"
+                )
+            continue
 
         L_choice, L_aux, L_switch = compute_losses(results)
         L_rate = torch.stack(rate_terms).mean()
@@ -198,7 +216,8 @@ def main(cfg: Config):
         if not torch.isfinite(L_total) or not torch.isfinite(grad_norm):
             model.load_state_dict(last_good_state)
             optimizer.load_state_dict(last_good_opt_state)
-            env.h = torch.zeros_like(env.h)  # pyright: ignore[reportArgumentType]
+            env.zero_hidden_state()
+            env.reset()
             msg = (
                 f"[step {step}] NaN/Inf detected -- rolled back to last good checkpoint"
             )
@@ -210,14 +229,11 @@ def main(cfg: Config):
             continue
 
         optimizer.step()
-        assert env.h is not None
-        env.h = env.h.detach()  # truncated BPTT boundary
 
         if step % 50 == 0:
             last_good_state = copy.deepcopy(model.state_dict())
             last_good_opt_state = copy.deepcopy(optimizer.state_dict())
 
-        # --- metrics (computed regardless of logging backend) ---
         all_choice = torch.cat([r.choice for r in results])
         all_correct = torch.cat([r.correct_label for r in results])
         all_timed_out = torch.cat([r.timed_out for r in results])
@@ -231,6 +247,7 @@ def main(cfg: Config):
                 (all_choice[has_prev] == prev_cat[has_prev]).float().mean().item()
             )
         congr_scalars = congruency_accuracy_scalars(results, cfg.env.contrasts)
+        n_resolved = len(all_choice)
 
         if cfg.training.use_wandb:
             wandb.log(
@@ -244,7 +261,8 @@ def main(cfg: Config):
                     "train/accuracy": acc,
                     "train/no_response_rate": no_resp,
                     "train/repeat_rate": repeat_rate,
-                    "train/chunk_len_K": K,
+                    "train/n_resolved_trials": n_resolved,
+                    "train/chunk_len_dt": chunk_len,
                     "train/teacher_forcing_prob": tf_prob,
                     "diag/W_ff_effective_rank": model.effective_rank_ff(),
                     "diag/W_fb_norm": model.W_fb.norm().item(),
@@ -255,16 +273,14 @@ def main(cfg: Config):
                 }
             )
         else:
-            # console fallback
             print(
-                f"step {step:5d} | K={K:3d} | L_total={L_total.item():.4f} "
-                f"L_choice={L_choice.item():.4f} L_aux={L_aux.item():.4f} "
-                f"L_switch={L_switch.item():.4f} | acc={acc:.3f} "
+                f"step {step:5d} | chunk_dt={chunk_len:4d} | n_resolved={n_resolved:3d} | "
+                f"L_total={L_total.item():.4f} L_choice={L_choice.item():.4f} "
+                f"L_aux={L_aux.item():.4f} L_switch={L_switch.item():.4f} | acc={acc:.3f} "
                 f"no_resp={no_resp:.3f} repeat={repeat_rate if repeat_rate is None else round(repeat_rate,3)} "
                 f"| grad_norm={grad_norm.item():.3f}"
             )
 
-        # this ensures local training runs are never saved.
         if cfg.training.use_wandb and step % cfg.training.ckpt_every == 0:
             path = os.path.join(run_ckpt_dir, f"ckpt_{step}.pt")
             torch.save(
@@ -282,3 +298,19 @@ def main(cfg: Config):
 
 if __name__ == "__main__":
     main()
+
+"""
+python modularRNN/train.py \
+training.device=cpu training.use_wandb=true training.compile_model=false \
+model.n_visp=32 model.n_mos=32 model.rank_ff=3 \
+env.batch_size=32 \
+env.n_blocks=5 env.n_unbiased_blocks=1 \
+env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
+env.contrasts="[0.0,0.0625,0.125,0.25,1.0]" \
+env.T_max=100 env.T_iti=10 \
+decision.t_min=10 decision.theta=0.9 \
+env.kappa_kernel=0.5 env.xi_kernel=0.2 \
+training.n_steps=20000 \
+training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=1000 \
+training.ckpt_every=1000
+"""

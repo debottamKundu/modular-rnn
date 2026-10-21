@@ -1,12 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 import torch
 
-from inputs import (
-    make_stimulus_input,
-    make_feedback_vector,
-    make_feedback_vector_akernel,
-)
+from inputs import make_stimulus_input_step, make_feedback_vector
+
+DECISION, ITI = 0, 1
 
 
 @dataclass
@@ -26,32 +24,294 @@ class TrialResult:
     stim_side: torch.Tensor
     prev_model_choice: torch.Tensor
     has_prev_choice: torch.Tensor
+    session_id: torch.Tensor
     action_kernel: torch.Tensor
-    session_id: (
-        torch.Tensor
-    )  # (batch_idx, refill_count) identity, for grouping trials into sessions post-hoc
-    full_r_v: Optional[torch.Tensor] = None
-    full_r_m: Optional[torch.Tensor] = None
-    full_x_stim: Optional[torch.Tensor] = None
+    batch_idx: torch.Tensor
 
 
-class ClosedLoopEnv:
+@dataclass
+class EnvState:
+    h: torch.Tensor
+    phase: torch.Tensor
+    phase_step: torch.Tensor
+    trial_idx: torch.Tensor
+    session_count: torch.Tensor
+    last_outcome_fb: torch.Tensor
+    action_kernel: torch.Tensor
+    prev_model_choice: torch.Tensor
+    has_prev_choice: torch.Tensor
+    aux_accum: torch.Tensor
+    aux_count: torch.Tensor
+    cur_contrast: torch.Tensor
+    cur_stim_side: torch.Tensor
+    cur_correct_label: torch.Tensor
+    cur_block_id: torch.Tensor
+    cur_block_bias: torch.Tensor
+    cur_trial_in_block: torch.Tensor
+    cur_session_id: torch.Tensor
+
+    def detach(self) -> "EnvState":
+        return EnvState(**{k: v.detach() for k, v in self.__dict__.items()})
+
+
+def _fetch_new_trials(
+    state: EnvState, plan, plan_gen, mask: torch.Tensor, device
+) -> EnvState:
+    """Pure: returns a NEW EnvState with rows in `mask` advanced to their next
+    trial. `plan`'s own tensors (generated session metadata, no grad) may be
+    refilled in place by plan_gen -- that's safe since plan never touches
+    autograd. `state` itself is never mutated; every field is reconstructed."""
+    if not mask.any():
+        return state
+
+    need_refill = mask & (state.trial_idx >= plan["total_trials"])
+    if need_refill.any():
+        plan_gen.refill(plan, need_refill)
+
+    trial_idx = torch.where(
+        need_refill, torch.zeros_like(state.trial_idx), state.trial_idx
+    )
+    B = trial_idx.shape[0]
+    b_idx = torch.arange(B, device=device)
+    safe_t_idx = torch.clamp(trial_idx, max=plan["contrast"].shape[1] - 1)
+
+    new_contrast = plan["contrast"][b_idx, safe_t_idx]
+    new_stim_side = plan["stim_side"][b_idx, safe_t_idx]
+    new_correct_label = plan["correct_label"][b_idx, safe_t_idx]
+    new_block_id = plan["block_id"][b_idx, safe_t_idx]
+    new_block_bias = plan["block_bias"][b_idx, safe_t_idx]
+    new_trial_in_block = plan["trial_in_block"][b_idx, safe_t_idx]
+
+    session_count = state.session_count + need_refill.long()
+    new_session_id = b_idx.to(torch.long) * 10_000 + session_count
+
+    h = torch.where(need_refill.unsqueeze(-1), torch.zeros_like(state.h), state.h)
+    last_outcome_fb = torch.where(
+        need_refill.unsqueeze(-1),
+        torch.zeros_like(state.last_outcome_fb),
+        state.last_outcome_fb,
+    )
+    action_kernel = torch.where(
+        need_refill, torch.zeros_like(state.action_kernel), state.action_kernel
+    )
+    prev_model_choice = torch.where(
+        need_refill, torch.zeros_like(state.prev_model_choice), state.prev_model_choice
+    )
+    has_prev_choice = torch.where(
+        need_refill, torch.zeros_like(state.has_prev_choice), state.has_prev_choice
+    )
+
+    return replace(
+        state,
+        h=h,
+        phase=torch.where(mask, torch.full_like(state.phase, DECISION), state.phase),
+        phase_step=torch.where(
+            mask, torch.zeros_like(state.phase_step), state.phase_step
+        ),
+        trial_idx=torch.where(mask, trial_idx + 1, state.trial_idx),
+        session_count=session_count,
+        last_outcome_fb=last_outcome_fb,
+        action_kernel=action_kernel,
+        prev_model_choice=prev_model_choice,
+        has_prev_choice=has_prev_choice,
+        aux_accum=torch.where(mask, torch.zeros_like(state.aux_accum), state.aux_accum),
+        aux_count=torch.where(mask, torch.zeros_like(state.aux_count), state.aux_count),
+        cur_contrast=torch.where(mask, new_contrast, state.cur_contrast),
+        cur_stim_side=torch.where(mask, new_stim_side, state.cur_stim_side),
+        cur_correct_label=torch.where(mask, new_correct_label, state.cur_correct_label),
+        cur_block_id=torch.where(mask, new_block_id, state.cur_block_id),
+        cur_block_bias=torch.where(mask, new_block_bias, state.cur_block_bias),
+        cur_trial_in_block=torch.where(
+            mask, new_trial_in_block, state.cur_trial_in_block
+        ),
+        cur_session_id=torch.where(mask, new_session_id, state.cur_session_id),
+    )
+
+
+def init_state(model, plan, plan_gen, batch_size, device) -> EnvState:
+    B = batch_size
+    state = EnvState(
+        h=torch.zeros(B, model.n_total, device=device),
+        phase=torch.full((B,), DECISION, dtype=torch.long, device=device),
+        phase_step=torch.zeros(B, dtype=torch.long, device=device),
+        trial_idx=torch.zeros(B, dtype=torch.long, device=device),
+        session_count=torch.zeros(B, dtype=torch.long, device=device),
+        last_outcome_fb=torch.zeros(B, model.n_fb, device=device),
+        action_kernel=torch.zeros(B, device=device),
+        prev_model_choice=torch.zeros(B, device=device),
+        has_prev_choice=torch.zeros(B, dtype=torch.bool, device=device),
+        aux_accum=torch.zeros(B, device=device),
+        aux_count=torch.zeros(B, device=device),
+        cur_contrast=torch.zeros(B, device=device),
+        cur_stim_side=torch.zeros(B, device=device),
+        cur_correct_label=torch.zeros(B, dtype=torch.long, device=device),
+        cur_block_id=torch.zeros(B, dtype=torch.long, device=device),
+        cur_block_bias=torch.zeros(B, device=device),
+        cur_trial_in_block=torch.zeros(B, dtype=torch.long, device=device),
+        cur_session_id=torch.zeros(B, dtype=torch.long, device=device),
+    )
+    all_rows = torch.ones(B, dtype=torch.bool, device=device)
+    return _fetch_new_trials(state, plan, plan_gen, all_rows, device)
+
+
+def step_dt(
+    model,
+    state: EnvState,
+    plan,
+    plan_gen,
+    device,
+    T_max,
+    T_iti,
+    t_min,
+    theta,
+    sigma_stim,
+    hold_fb_during_stim,
+    t_quiescence,
+    use_action_kernel,
+    kappa_kernel,
+    xi_kernel,
+    teacher_forcing_prob=0.0,
+):
+    B = state.h.shape[0]
+    in_decision = state.phase == DECISION
+    in_iti = ~in_decision
+
+    x_stim_t = make_stimulus_input_step(
+        state.cur_contrast,
+        state.cur_stim_side,
+        model.n_stim,
+        sigma_stim,
+        model.dt,
+        device,
+    )
+    if t_quiescence > 0:
+        in_quiescence = in_decision & (state.phase_step < t_quiescence)
+        x_stim_t = x_stim_t * (~in_quiescence).float().unsqueeze(-1)
+    x_stim_t = x_stim_t * in_decision.float().unsqueeze(-1)
+
+    just_entered_iti = in_iti & (state.phase_step == 0)
+    fb_active = just_entered_iti | (in_decision & hold_fb_during_stim)
+    x_fb_t = state.last_outcome_fb * fb_active.float().unsqueeze(-1)
+
+    h_new = model.step(state.h, x_stim_t, x_fb_t)
+    z, g, r_v, r_m = model.readout(h_new)
+
+    accumulate_aux = in_decision & (state.phase_step >= t_quiescence)
+    aux_accum = state.aux_accum + g * accumulate_aux.float()
+    aux_count = state.aux_count + accumulate_aux.float()
+
+    y = z[:, 1] - z[:, 0]
+    crossed = in_decision & (state.phase_step >= t_min) & (y.abs() >= theta)
+    timed_out_now = in_decision & (~crossed) & (state.phase_step >= T_max - 1)
+    resolved_now = crossed | timed_out_now
+
+    model_choice_full = (z[:, 1] > z[:, 0]).long()
+    model_reward_full = (model_choice_full == state.cur_correct_label).float()
+    tf_mask = torch.rand(B, device=device) < teacher_forcing_prob
+    fb_reward_full = torch.where(
+        tf_mask, torch.ones(B, device=device), model_reward_full
+    )
+
+    if use_action_kernel:
+        choice_signed_full = model_choice_full.float() * 2 - 1
+        new_kernel_full = (
+            1 - xi_kernel
+        ) * state.action_kernel + xi_kernel * choice_signed_full
+        kernel_term_full = kappa_kernel * new_kernel_full
+    else:
+        new_kernel_full, kernel_term_full = None, None
+
+    new_fb_vec_full = make_feedback_vector(
+        fb_reward_full, device, model.n_fb, kernel_term_full
+    )
+
+    result = None
+    if resolved_now.any():
+        ridx = resolved_now.nonzero(as_tuple=True)[0]
+        aux_pred = aux_accum[ridx] / aux_count[ridx].clamp(min=1)
+        result = TrialResult(
+            z_c=z[ridx],
+            aux_pred=aux_pred,
+            target_stim=state.cur_stim_side[ridx] * state.cur_contrast[ridx],
+            correct_label=state.cur_correct_label[ridx],
+            choice=model_choice_full[ridx],
+            reward=model_reward_full[ridx],
+            rt=state.phase_step[ridx].clone(),
+            timed_out=timed_out_now[ridx],
+            block_id=state.cur_block_id[ridx],
+            block_bias=state.cur_block_bias[ridx],
+            trial_in_block=state.cur_trial_in_block[ridx],
+            contrast=state.cur_contrast[ridx],
+            stim_side=state.cur_stim_side[ridx],
+            prev_model_choice=state.prev_model_choice[ridx].clone(),
+            has_prev_choice=state.has_prev_choice[ridx].clone(),
+            session_id=state.cur_session_id[ridx],
+            action_kernel=(
+                state.action_kernel[ridx].clone()
+                if use_action_kernel
+                else torch.full((len(ridx),), float("nan"), device=device)
+            ),
+            batch_idx=ridx,
+        )
+
+    last_outcome_fb = torch.where(
+        resolved_now.unsqueeze(-1), new_fb_vec_full, state.last_outcome_fb
+    )
+    action_kernel = (
+        torch.where(resolved_now, new_kernel_full, state.action_kernel)
+        if use_action_kernel
+        else state.action_kernel
+    )
+    prev_model_choice = torch.where(
+        resolved_now, model_choice_full.float(), state.prev_model_choice
+    )
+    has_prev_choice = state.has_prev_choice | resolved_now
+    phase = torch.where(resolved_now, torch.full_like(state.phase, ITI), state.phase)
+    phase_step = torch.where(
+        resolved_now, torch.zeros_like(state.phase_step), state.phase_step + 1
+    )
+
+    new_state = replace(
+        state,
+        h=h_new,
+        phase=phase,
+        phase_step=phase_step,
+        last_outcome_fb=last_outcome_fb,
+        action_kernel=action_kernel,
+        prev_model_choice=prev_model_choice,
+        has_prev_choice=has_prev_choice,
+        aux_accum=aux_accum,
+        aux_count=aux_count,
+    )
+
+    iti_finished = in_iti & (~just_entered_iti) & (new_state.phase_step >= T_iti)
+    if iti_finished.any():
+        new_state = _fetch_new_trials(new_state, plan, plan_gen, iti_finished, device)
+
+    return new_state, result
+
+
+class AsyncClosedLoopEnv:
+    """Thin stateful convenience wrapper around the pure functions above --
+    keeps train.py's call sites (env.reset(), env.step_dt(...), env.h,
+    detach-at-chunk-boundary) almost unchanged, while every actual state
+    transition underneath is a pure, out-of-place reconstruction."""
 
     def __init__(
         self,
         model,
-        plan_gen: "SessionPlanGenerator",
-        batch_size: int,
+        plan_gen,
+        batch_size,
         device,
-        T_max: int,
-        T_iti: int,
-        t_min: int,
-        theta: float,
-        sigma_stim: float,
-        hold_fb_during_stim: bool,
-        t_quiescence: int = 0,
-        kappa_kernel: float = 0.0,
-        xi_kernel: float = 0.2,
+        T_max,
+        T_iti,
+        t_min,
+        theta,
+        sigma_stim,
+        hold_fb_during_stim,
+        t_quiescence=0,
+        kappa_kernel=0.0,
+        xi_kernel=0.2,
     ):
         self.model, self.plan_gen = model, plan_gen
         self.B, self.device = batch_size, device
@@ -59,179 +319,44 @@ class ClosedLoopEnv:
         self.t_min, self.theta, self.sigma_stim = t_min, theta, sigma_stim
         self.hold_fb_during_stim = hold_fb_during_stim
         self.t_quiescence = t_quiescence
-        self.h = None
         self.use_action_kernel = kappa_kernel != 0.0
-        self.kappa_kernel = kappa_kernel
-        self.xi_kernel = xi_kernel
+        self.kappa_kernel, self.xi_kernel = kappa_kernel, xi_kernel
+        self.state: Optional[EnvState] = None
+        self.plan = None
 
     def reset(self):
-        self.h = torch.zeros(self.B, self.model.n_total, device=self.device)
-        self._prev_reward = torch.zeros(self.B, device=self.device)
-        self._prev_model_choice = torch.zeros(self.B, device=self.device)
-        self._has_prev_choice = torch.zeros(
-            self.B, dtype=torch.bool, device=self.device
-        )
-        self.trial_idx = torch.zeros(self.B, dtype=torch.long, device=self.device)
-        if self.use_action_kernel:
-            self._action_kernel = torch.zeros(self.B, device=self.device)
-        self.session_count = torch.zeros(self.B, dtype=torch.long, device=self.device)
         self.plan = self.plan_gen.generate(self.B)
-
-    def _reset_state(self, done_mask):
-        with torch.no_grad():
-            self.h[done_mask] = 0.0
-            self._prev_reward[done_mask] = 0.0
-            self._prev_model_choice[done_mask] = 0.0
-            self._has_prev_choice[done_mask] = False
-            if self.use_action_kernel:
-                self._action_kernel[done_mask] = 0.0
-        self.session_count[done_mask] += 1
-
-    def _fb_kernel_term(self):
-        return (
-            self.kappa_kernel * self._action_kernel if self.use_action_kernel else None
+        self.state = init_state(
+            self.model, self.plan, self.plan_gen, self.B, self.device
         )
 
-    def run_trial(
-        self, teacher_forcing_prob: float = 0.0, store_full_trace: bool = False
-    ):
-        B, device, model = self.B, self.device, self.model
+    def zero_hidden_state(self):
+        self.state = replace(self.state, h=torch.zeros_like(self.state.h))
 
-        # refill any sessions fully consumed, BEFORE reading this trial's data --
-        # this is what makes session length variable/asynchronous across the batch
-        done_mask = self.trial_idx >= self.plan["total_trials"]
-        if done_mask.any():
-            self.plan_gen.refill(self.plan, done_mask)
-            self.trial_idx = torch.where(
-                done_mask, torch.zeros_like(self.trial_idx), self.trial_idx
-            )
-            self._reset_state(done_mask)
-
-        b_idx = torch.arange(B, device=device)
-        t_idx = self.trial_idx
-        contrast = self.plan["contrast"][b_idx, t_idx]
-        stim_side = self.plan["stim_side"][b_idx, t_idx]
-        correct_label = self.plan["correct_label"][b_idx, t_idx]
-        block_id = self.plan["block_id"][b_idx, t_idx]
-        block_bias = self.plan["block_bias"][b_idx, t_idx]
-        trial_in_block = self.plan["trial_in_block"][b_idx, t_idx]
-        session_id = (
-            b_idx * 10_000 + self.session_count
-        )  # unique id per (batch slot, refill)
-
-        self.trial_idx = self.trial_idx + 1
-
-        x_stim_seq = make_stimulus_input(
-            contrast,
-            stim_side,
+    def step_dt(self, teacher_forcing_prob: float = 0.0):
+        self.state, result = step_dt(
+            self.model,
+            self.state,
+            self.plan,
+            self.plan_gen,
+            self.device,
             self.T_max,
-            model.dt,
-            model.n_stim,
+            self.T_iti,
+            self.t_min,
+            self.theta,
             self.sigma_stim,
-            device,
+            self.hold_fb_during_stim,
+            self.t_quiescence,
+            self.use_action_kernel,
+            self.kappa_kernel,
+            self.xi_kernel,
+            teacher_forcing_prob,
         )
-        if self.t_quiescence > 0:
-            x_stim_seq[:, : self.t_quiescence, :] = (
-                0.0  # optional pre-stimulus quiescence period
-            )
-        if self.use_action_kernel:
-            action_kernel_snapshot = self._action_kernel.clone()
-        else:
-            action_kernel_snapshot = torch.full((B,), float("nan"), device=device)
+        return result
 
-        fb_const = make_feedback_vector(
-            self._prev_reward, device, model.n_fb, self._fb_kernel_term()
-        )
-        zero_fb = torch.zeros(B, model.n_fb, device=device)
-        zero_stim = torch.zeros(B, model.n_stim, device=device)
+    def detach_state(self):
+        self.state = self.state.detach()
 
-        z_hist, aux_hist, x_stim_hist = [], [], []
-        r_v_hist, r_m_hist = ([], []) if store_full_trace else (None, None)
-
-        committed = torch.zeros(B, dtype=torch.bool, device=device)
-        commit_idx = torch.full((B,), self.T_max - 1, dtype=torch.long, device=device)
-
-        for t in range(self.T_max):
-            x_fb_t = fb_const if self.hold_fb_during_stim else zero_fb
-            stim_mask = (~committed).float().unsqueeze(-1)
-            x_stim_t = x_stim_seq[:, t] * stim_mask
-
-            self.h = model.step(self.h, x_stim_t, x_fb_t)
-            z, g, r_v, r_m = model.readout(self.h)
-            z_hist.append(z)
-            aux_hist.append(g)
-            if store_full_trace:
-                r_v_hist.append(r_v)
-                r_m_hist.append(r_m)
-                x_stim_hist.append(x_stim_seq[:, t])
-
-            y = z[:, 1] - z[:, 0]
-            cross = (~committed) & (t >= self.t_min) & (y.abs() >= self.theta)
-            commit_idx = torch.where(cross, torch.full_like(commit_idx, t), commit_idx)
-            committed = committed | cross
-
-        timed_out = ~committed
-
-        Z = torch.stack(z_hist, dim=1)
-        Aux = torch.stack(aux_hist, dim=1)
-        z_c = Z[torch.arange(B, device=device), commit_idx]
-        # aux_pred = Aux[:, self.t_quiescence :].mean(dim=1)
-
-        Aux_masked = Aux.clone()
-        t_range = torch.arange(Aux.shape[1], device=device).unsqueeze(0)
-        valid = (t_range >= self.t_quiescence) & (t_range <= commit_idx.unsqueeze(1))
-        aux_pred = (Aux_masked * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
-
-        with torch.no_grad():
-            model_choice = (z_c[:, 1] > z_c[:, 0]).long()
-            model_reward = (model_choice == correct_label).float()
-            tf_mask = torch.rand(B, device=device) < teacher_forcing_prob
-            fb_reward = torch.where(tf_mask, torch.ones(B, device=device), model_reward)
-
-            if self.use_action_kernel:
-                choice_signed = model_choice * 2 - 1
-                self._action_kernel = (
-                    1 - self.xi_kernel
-                ) * self._action_kernel + self.xi_kernel * choice_signed
-
-        prev_model_choice = self._prev_model_choice.clone()
-        has_prev_choice = self._has_prev_choice.clone()
-
-        fb_vec = make_feedback_vector(
-            fb_reward, device, model.n_fb, self._fb_kernel_term()
-        )
-        for t in range(self.T_iti):
-            x_fb_t = fb_vec if t == 0 else zero_fb
-            self.h = model.step(self.h, zero_stim, x_fb_t)
-            if store_full_trace:
-                _, _, r_v, r_m = model.readout(self.h)
-                r_v_hist.append(r_v)
-                r_m_hist.append(r_m)
-                x_stim_hist.append(zero_stim)
-
-        self._prev_reward = fb_reward
-        self._prev_model_choice = model_choice.float()
-        self._has_prev_choice = torch.ones(B, dtype=torch.bool, device=device)
-
-        return TrialResult(
-            z_c=z_c,
-            aux_pred=aux_pred,
-            target_stim=stim_side.float() * contrast,
-            correct_label=correct_label,
-            choice=model_choice,
-            reward=model_reward,
-            rt=commit_idx,
-            timed_out=timed_out,
-            block_id=block_id,
-            block_bias=block_bias,
-            trial_in_block=trial_in_block,
-            contrast=contrast,
-            stim_side=stim_side,
-            prev_model_choice=prev_model_choice,
-            has_prev_choice=has_prev_choice,
-            session_id=session_id,
-            action_kernel=action_kernel_snapshot,
-            full_r_v=torch.stack(r_v_hist, dim=1) if store_full_trace else None,
-            full_r_m=torch.stack(r_m_hist, dim=1) if store_full_trace else None,
-            full_x_stim=torch.stack(x_stim_hist, dim=1) if store_full_trace else None,
-        )
+    @property
+    def h(self):
+        return self.state.h

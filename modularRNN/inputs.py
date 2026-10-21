@@ -47,3 +47,15 @@ def make_feedback_vector(reward, device, n_fb, kernel_bias=None):
     assert n_fb == 2, f"n_fb={n_fb} but kernel_bias was provided"
     kernel_bias = kernel_bias.to(device)
     return torch.cat([reward_enc.unsqueeze(-1), kernel_bias.unsqueeze(-1)], dim=-1)
+
+
+def make_stimulus_input_step(contrast, stim_side, n_stim, sigma_stim, dt, device):
+    """Per-row, single-timestep version , stimulus is generated one dt at a time."""
+    B = contrast.shape[0]
+    mu_left = torch.clamp(-stim_side, min=0) * contrast
+    mu_right = torch.clamp(stim_side, min=0) * contrast
+    mu = torch.stack([mu_left, mu_right], dim=-1)
+    if n_stim > 2:
+        mu = torch.cat([mu, torch.zeros(B, n_stim - 2, device=device)], dim=-1)
+    noise = torch.randn(B, n_stim, device=device) * (sigma_stim / dt**0.5)
+    return mu + noise

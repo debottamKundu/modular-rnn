@@ -47,6 +47,8 @@ class EnvConfig:
     )
     t_quiescence: int = 0
     eval_batch_size: int = 64
+    kappa_kernel: float = 0.5
+    xi_kernel: float = 0.2
 
 
 @dataclass
@@ -60,9 +62,9 @@ class LossConfig:
 @dataclass
 class TrainingConfig:
     n_steps: int = 20000
-    k_start: int = 4
-    k_growth_every: int = 500
-    k_max: int = 60
+    chunk_dt_start: int = 40
+    chunk_dt_growth_every: int = 500
+    chunk_dt_max: int = 400
     grad_clip: float = 1.0
     lr: float = 1e-3
     teacher_forcing_start: float = 0.0
