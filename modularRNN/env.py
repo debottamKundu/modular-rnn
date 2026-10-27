@@ -2,7 +2,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 import torch
 
-from inputs import make_stimulus_input_step, make_feedback_vector
+from .inputs import make_stimulus_input_step, make_feedback_vector
 
 DECISION, ITI = 0, 1
 
@@ -154,6 +154,22 @@ def init_state(model, plan, plan_gen, batch_size, device) -> EnvState:
     return _fetch_new_trials(state, plan, plan_gen, all_rows, device)
 
 
+def _timing_mask(
+    preset: str,
+    in_decision: torch.Tensor,
+    in_iti: torch.Tensor,
+    just_entered_iti: torch.Tensor,
+) -> torch.Tensor:
+    if preset == "pulse_only":
+        return just_entered_iti
+    elif preset == "persist_iti":
+        return in_iti
+    elif preset == "persist_iti_and_decision":
+        return in_iti | in_decision
+    else:
+        raise ValueError(f"unknown timing preset: {preset}")
+
+
 def step_dt(
     model,
     state: EnvState,
@@ -165,12 +181,14 @@ def step_dt(
     t_min,
     theta,
     sigma_stim,
-    hold_fb_during_stim,
+    reward_timing,
+    kernel_timing,
     t_quiescence,
     use_action_kernel,
     kappa_kernel,
     xi_kernel,
     teacher_forcing_prob=0.0,
+    return_hidden=False,
 ):
     B = state.h.shape[0]
     in_decision = state.phase == DECISION
@@ -189,9 +207,28 @@ def step_dt(
         x_stim_t = x_stim_t * (~in_quiescence).float().unsqueeze(-1)
     x_stim_t = x_stim_t * in_decision.float().unsqueeze(-1)
 
+    # just_entered_iti = in_iti & (state.phase_step == 0)
+    # # ensure that the action kernel is injected during the entire ITI.
+
+    # fb_active = just_entered_iti | (in_decision & hold_fb_during_stim)
+    # x_fb_t = state.last_outcome_fb * fb_active.float().unsqueeze(-1)
+
+    # new construction, to have more flexibility in feedback
+
     just_entered_iti = in_iti & (state.phase_step == 0)
-    fb_active = just_entered_iti | (in_decision & hold_fb_during_stim)
-    x_fb_t = state.last_outcome_fb * fb_active.float().unsqueeze(-1)
+    reward_active = _timing_mask(reward_timing, in_decision, in_iti, just_entered_iti)
+    kernel_active = _timing_mask(kernel_timing, in_decision, in_iti, just_entered_iti)
+
+    reward_component = state.last_outcome_fb[:, 0:1] * reward_active.float().unsqueeze(
+        -1
+    )
+    if model.n_fb == 2:
+        kernel_component = state.last_outcome_fb[
+            :, 1:2
+        ] * kernel_active.float().unsqueeze(-1)
+        x_fb_t = torch.cat([reward_component, kernel_component], dim=-1)
+    else:
+        x_fb_t = reward_component
 
     h_new = model.step(state.h, x_stim_t, x_fb_t)
     z, g, r_v, r_m = model.readout(h_new)
@@ -288,6 +325,9 @@ def step_dt(
     if iti_finished.any():
         new_state = _fetch_new_trials(new_state, plan, plan_gen, iti_finished, device)
 
+    if return_hidden:
+        return new_state, result, r_v.detach(), r_m.detach(), x_stim_t.detach()
+
     return new_state, result
 
 
@@ -308,7 +348,8 @@ class AsyncClosedLoopEnv:
         t_min,
         theta,
         sigma_stim,
-        hold_fb_during_stim,
+        reward_timing="pulse_only",
+        kernel_timing="persist_iti",
         t_quiescence=0,
         kappa_kernel=0.0,
         xi_kernel=0.2,
@@ -333,8 +374,12 @@ class AsyncClosedLoopEnv:
     def zero_hidden_state(self):
         self.state = replace(self.state, h=torch.zeros_like(self.state.h))
 
-    def step_dt(self, teacher_forcing_prob: float = 0.0):
-        self.state, result = step_dt(
+    def step_dt(
+        self,
+        teacher_forcing_prob: float = 0.0,
+        return_hidden=False,
+    ):
+        out = step_dt(
             self.model,
             self.state,
             self.plan,
@@ -351,8 +396,14 @@ class AsyncClosedLoopEnv:
             self.kappa_kernel,
             self.xi_kernel,
             teacher_forcing_prob,
+            return_hidden,
         )
-        return result
+        if return_hidden:
+            self.state, result, r_v, r_m, x_stim = out
+            return result, r_v, r_m, x_stim
+        else:
+            self.state, result = out
+            return result
 
     def detach_state(self):
         self.state = self.state.detach()

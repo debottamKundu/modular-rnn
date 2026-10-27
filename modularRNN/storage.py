@@ -44,13 +44,22 @@ class HiddenStateStore:
         "prev_model_choice",
         "has_prev_choice",
         "action_kernel",
+        "trace_len",
     ]
 
     def __init__(
-        self, path, n_visp, n_mos, n_stim, store_full_traces=False, chunk_trials=256
+        self,
+        path,
+        n_visp,
+        n_mos,
+        n_stim,
+        store_full_traces=False,
+        chunk_trials=256,
+        t_iti=None,
     ):
         self.store = zarr.open(path, mode="a")
         self.store_full_traces = store_full_traces
+        self.t_iti = t_iti
 
         for col in self.SCALAR_FIELDS:
             _create_array(
@@ -70,6 +79,12 @@ class HiddenStateStore:
 
     def append(self, result, training_step):
         B = result.z_c.shape[0]
+        rt_np = result.rt.cpu().numpy().astype("f4")
+        if self.t_iti is not None:
+            trace_len = rt_np + 1 + self.t_iti
+        else:
+            trace_len = np.full(B, np.nan, dtype="f4")
+
         scalars = {
             "training_step": np.full(B, training_step, dtype="f4"),
             "session_id": result.session_id.cpu().numpy().astype("f4"),
@@ -86,6 +101,7 @@ class HiddenStateStore:
             "prev_model_choice": result.prev_model_choice.cpu().numpy().astype("f4"),
             "has_prev_choice": result.has_prev_choice.cpu().numpy().astype("f4"),
             "action_kernel": result.action_kernel.cpu().numpy().astype("f4"),
+            "trace_len": trace_len,
         }
         for col, arr in scalars.items():
             _append_along_axis(self.store[col], arr, axis=0)

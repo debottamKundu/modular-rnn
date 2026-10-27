@@ -9,14 +9,14 @@ torch.autograd.set_detect_anomaly(True)
 import wandb
 from omegaconf import DictConfig, OmegaConf
 
-from conf.config import Config
-from model import ModularCTRNN
-from env import AsyncClosedLoopEnv
-from generators import SessionPlanGenerator
-from losses import compute_losses
-from congruency import congruency_accuracy_scalars
-from storage import HiddenStateStore
-from utils import get_run_id, set_seed, spectral_radius
+from .conf.config import Config
+from .model import ModularCTRNN
+from .env import AsyncClosedLoopEnv
+from .generators import SessionPlanGenerator
+from .losses import compute_losses
+from .congruency import congruency_accuracy_scalars
+from .storage import HiddenStateStore
+from .utils import get_run_id, set_seed, spectral_radius, validate_config_consistency
 
 # from eval import (
 #     make_eval_env,
@@ -52,6 +52,7 @@ def anneal(step, n_steps, start, end, frac):
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: Config):
     print(OmegaConf.to_yaml(cfg))
+    validate_config_consistency(cfg)
     set_seed(cfg.training.seed)
     device = torch.device(cfg.training.device)
 
@@ -85,6 +86,8 @@ def main(cfg: Config):
         in_gain=cfg.model.in_gain,
         sigma_baseline=cfg.model.sigma_baseline,
         nonlinearity=cfg.model.nonlinearity,
+        fb_mode=cfg.model.fb_mode,
+        fb_sparsity=cfg.model.fb_sparsity,
     ).to(device)
 
     # if cfg.training.compile_model and device.type != "mps":
@@ -104,6 +107,11 @@ def main(cfg: Config):
         possible_contrasts=cfg.env.contrasts,
         device=device,
     )
+    assert (cfg.env.kappa_kernel != 0.0) == (cfg.model.n_fb == 2), (
+        f"Inconsistent config: env.kappa_kernel={cfg.env.kappa_kernel} implies "
+        f"use_action_kernel={cfg.env.kappa_kernel != 0.0}, but model.n_fb={cfg.model.n_fb} "
+        f"(must be 2 if action kernel is enabled, 1 if disabled)."
+    )
 
     env = AsyncClosedLoopEnv(
         model=model,
@@ -115,17 +123,22 @@ def main(cfg: Config):
         t_min=cfg.decision.t_min,
         theta=cfg.decision.theta,
         sigma_stim=cfg.env.sigma_stim,
-        hold_fb_during_stim=cfg.env.hold_fb_during_stim,
+        reward_timing=cfg.env.reward_timing,
+        kernel_timing=cfg.env.kernel_timing,
         t_quiescence=cfg.env.t_quiescence,
+        kappa_kernel=cfg.env.kappa_kernel,
+        xi_kernel=cfg.env.xi_kernel,
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
 
+    # TODO: change this every time for a new sweep, for my sanity
     if cfg.training.use_wandb:
         wandb.init(
             project="modular-rnn-ibl",
             dir=cfg.paths.wandb_dir,
             config=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
+            notes="Feedback matrix from Wmv zeroed out, action kernel and feedback are pulsed, action kernel is a moving average",
         )
         wandb.watch(model, log="gradients", log_freq=200)  # type: ignore
     run_id = get_run_id(cfg.training.use_wandb)
@@ -155,6 +168,7 @@ def main(cfg: Config):
     #         cfg.model.n_mos,
     #         cfg.model.n_stim,
     #         store_full_traces=True,
+    #         t_iti=cfg.env.T_iti,
     #     )
 
     env.reset()
@@ -165,7 +179,7 @@ def main(cfg: Config):
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_opt_state = copy.deepcopy(optimizer.state_dict())
 
-    for step in range(cfg.training.n_steps):
+    for step in range(cfg.training.n_steps):  # to store the last checkpoint
 
         chunk_len = chunk_dt_schedule(step, cfg)
         tf_prob = anneal(
@@ -288,6 +302,7 @@ def main(cfg: Config):
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "step": step,
+                    "config": OmegaConf.to_container(cfg, resolve=True),
                 },
                 path,
             )

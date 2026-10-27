@@ -1,6 +1,7 @@
 import torch
-from env import AsyncClosedLoopEnv
-from storage import HiddenStateStore
+from tqdm import tqdm
+from .env import AsyncClosedLoopEnv
+from .storage import HiddenStateStore
 
 
 def run_and_save_single_session(
@@ -10,11 +11,12 @@ def run_and_save_single_session(
     env_cfg,
     decision_cfg,
     out_path,
-    n_trials,
+    max_trials=None,
     teacher_forcing_prob=0.0,
 ):
-    """Runs ONE session (batch_size=1) and writes a full per-trial hidden-state
-    trace (padded to T_max + T_iti) plus all scalar metadata to a zarr store."""
+    """Runs exactly ONE session, `max_trials`
+    is an optional safety cap only
+    """
     env = AsyncClosedLoopEnv(
         model=model,
         plan_gen=plan_gen,
@@ -25,39 +27,53 @@ def run_and_save_single_session(
         t_min=decision_cfg.t_min,
         theta=decision_cfg.theta,
         sigma_stim=env_cfg.sigma_stim,
-        hold_fb_during_stim=env_cfg.hold_fb_during_stim,
+        reward_timing=env_cfg.reward_timing,
+        kernel_timing=env_cfg.kernel_timing,
         t_quiescence=env_cfg.t_quiescence,
         kappa_kernel=env_cfg.kappa_kernel,
         xi_kernel=env_cfg.xi_kernel,
     )
     env.reset()
 
+    session_total_trials = int(env.plan["total_trials"][0].item())
+    print(f"(5 blocks, lengths={env.plan['block_id']})")
+
     max_len = env_cfg.T_max + env_cfg.T_iti
     store = HiddenStateStore(
-        out_path, model.n_visp, model.n_mos, model.n_stim, store_full_traces=True
+        out_path,
+        model.n_visp,
+        model.n_mos,
+        model.n_stim,
+        store_full_traces=True,
+        t_iti=env_cfg.T_iti,
     )
 
     model.eval()
     buf_r_v, buf_r_m, buf_x_stim = [], [], []
     pending_result = None
     n_saved = 0
+    stop_at = max_trials if max_trials is not None else session_total_trials
 
     with torch.no_grad():
-        prev_phase, prev_phase_step = env.phase[0].item(), env.phase_step[0].item()
+        prev_phase, prev_phase_step = (
+            env.state.phase[0].item(),
+            env.state.phase_step[0].item(),
+        )
 
-        while n_saved < n_trials:
+        while n_saved < min(session_total_trials, stop_at):
             res, r_v, r_m, x_stim = env.step_dt(
                 teacher_forcing_prob=teacher_forcing_prob, return_hidden=True
-            )  # type: ignore
+            )
             buf_r_v.append(r_v[0])
             buf_r_m.append(r_m[0])
             buf_x_stim.append(x_stim[0])
             if res is not None:
-                pending_result = (
-                    res  # commit/timeout happened this step; ITI still to follow
-                )
+                pending_result = res
 
-            new_phase, new_phase_step = env.phase[0].item(), env.phase_step[0].item()
+            new_phase, new_phase_step = (
+                env.state.phase[0].item(),
+                env.state.phase_step[0].item(),
+            )
             new_trial_started = (
                 prev_phase == 1 and new_phase == 0 and new_phase_step == 0
             )
@@ -92,6 +108,9 @@ def run_and_save_single_session(
             prev_phase, prev_phase_step = new_phase, new_phase_step
 
     model.train()
+    print(
+        f"Saved {n_saved}/{session_total_trials} trials for this session to {out_path}"
+    )
     return store
 
 

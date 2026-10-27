@@ -61,6 +61,7 @@ class SessionPlanGenerator:
         for j in range(self.n_biased):
             col = self.n_unbiased + j
             bias_seq[:, col] = biased_right if j % 2 == 0 else 1 - biased_right
+        bias_seq = torch.round(bias_seq * 1000) / 1000  # snap to 3 decimal places
         return bias_seq
 
     def generate(self, n):

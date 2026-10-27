@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from utils import get_nonlinearity
+from .utils import get_nonlinearity
 
 
 class ModularCTRNN(nn.Module):
@@ -26,6 +26,8 @@ class ModularCTRNN(nn.Module):
         in_gain: float,
         sigma_baseline: float,
         nonlinearity: str = "relu",
+        fb_mode: str = "dense",
+        fb_sparsity: float = 0.5,
     ):
         super().__init__()
         self.n_visp, self.n_mos = n_visp, n_mos
@@ -34,6 +36,8 @@ class ModularCTRNN(nn.Module):
         self.dt = dt
         self.sigma_baseline = sigma_baseline  # QUE: What is sigma baseline doing?
         self.phi = get_nonlinearity(nonlinearity)
+        self.fb_mode = fb_mode
+        self.fb_sparsity = fb_sparsity
 
         tau_v = torch.empty(n_visp).uniform_(*tau_visp_range)
         tau_m = torch.empty(n_mos).uniform_(*tau_mos_range)
@@ -59,9 +63,25 @@ class ModularCTRNN(nn.Module):
         )
 
         # feedback MOs->VISp: free, dense
+        # self.W_fb = nn.Parameter(
+        #     fb_gain * torch.randn(n_visp, n_mos) / math.sqrt(n_mos)
+        # )
+
+        # set sparsity
         self.W_fb = nn.Parameter(
             fb_gain * torch.randn(n_visp, n_mos) / math.sqrt(n_mos)
         )
+        if self.fb_mode == "dense":
+            self.register_buffer("W_fb_mask", torch.ones(n_visp, n_mos))
+        elif self.fb_mode == "zero":
+            self.register_buffer("W_fb_mask", torch.zeros(n_visp, n_mos))
+        elif self.fb_mode == "sparse":
+            mask = (
+                torch.rand(n_visp, n_mos) < self.fb_sparsity
+            ).float()  # fb_sparsity = fraction KEPT nonzero
+            self.register_buffer("W_fb_mask", mask)
+        else:
+            raise ValueError(f"unknown fb_mode: {fb_mode}")
 
         # input weights: hard block structure -- stim -> VISp only
 
@@ -87,6 +107,9 @@ class ModularCTRNN(nn.Module):
     def W_ff(self):
         return self.U_ff @ self.V_ff  # (n_mos, n_visp), rank <= rank_ff by construction
 
+    def W_mv(self):
+        return self.W_fb * self.W_fb_mask
+
     def effective_rank_ff(self) -> float:
         with torch.no_grad():
             s = torch.linalg.svdvals(self.W_ff())
@@ -99,7 +122,7 @@ class ModularCTRNN(nn.Module):
         r = self.phi(h)
         r_v, r_m = r[:, : self.n_visp], r[:, self.n_visp :]
 
-        rec_v = r_v @ self.W_vv.T + r_m @ self.W_fb.T
+        rec_v = r_v @ self.W_vv.T + r_m @ self.W_mv().T
         rec_m = r_m @ self.W_mm.T + r_v @ self.W_ff().T
         rec = torch.cat([rec_v, rec_m], dim=1)
 

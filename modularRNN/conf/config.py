@@ -9,7 +9,7 @@ class ModelConfig:
     n_visp: int = 64
     n_mos: int = 64
     n_stim: int = 2
-    n_fb: int = 1  # 1 for reward only, 2 for reward+kernel
+    n_fb: int = 2  # 1 for reward only, 2 for reward+kernel
     rank_ff: int = 5
     dt: float = 10.0
     tau_visp_range: List[float] = field(default_factory=lambda: [20.0, 60.0])
@@ -21,6 +21,8 @@ class ModelConfig:
     in_gain: float = 1.0
     sigma_baseline: float = 0.05
     nonlinearity: str = "relu"  # "relu" | "tanh" | "softplus"
+    fb_mode: str = "dense"
+    fb_sparsity: float = 1.0
 
 
 @dataclass
@@ -49,6 +51,10 @@ class EnvConfig:
     eval_batch_size: int = 64
     kappa_kernel: float = 0.5
     xi_kernel: float = 0.2
+    reward_timing: str = (
+        "pulse_only"  # "pulse_only" | "persist_iti" | "persist_iti_and_decision"
+    )
+    kernel_timing: str = "pulse_only"  # same three options, independently
 
 
 @dataclass
@@ -56,7 +62,7 @@ class LossConfig:
     lambda_aux: float = 1.0
     lambda_rate: float = 1e-3
     lambda_weight: float = 1e-4
-    lambda_switch: float = 0.3  # switching-cost weight
+    lambda_switch: float = 0.4  # switching-cost weight
 
 
 @dataclass
@@ -104,6 +110,17 @@ class ServerPaths(PathsConfig):
 
 
 @dataclass
+class PosthocConfig:
+    ckpt_path: str = MISSING
+    mode: str = "single_session"  # "batched" | "single_session"
+    n_dt_steps: int = 50000  # for batched mode
+    batch_size: int = 256  # for batched mode
+    max_trials: int = 600  # for single_session mode
+    total_sessions: int = 2
+    noise_scale: float = 1.0  # 1.0 = match training statistics; 0.0 = deterministic
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
@@ -112,6 +129,7 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     # paths: PathsConfig = field(default_factory=LocalPaths)
     paths: PathsConfig = MISSING
+    posthoc: PosthocConfig = field(default_factory=PosthocConfig)
 
 
 cs = ConfigStore.instance()
