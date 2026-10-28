@@ -16,7 +16,13 @@ from .generators import SessionPlanGenerator
 from .losses import compute_losses
 from .congruency import congruency_accuracy_scalars
 from .storage import HiddenStateStore
-from .utils import get_run_id, set_seed, spectral_radius, validate_config_consistency
+from .utils import (
+    get_run_id,
+    log_run_to_registry,
+    set_seed,
+    spectral_radius,
+    validate_config_consistency,
+)
 
 # from eval import (
 #     make_eval_env,
@@ -132,16 +138,17 @@ def main(cfg: Config):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
 
-    # TODO: change this every time for a new sweep, for my sanity
     if cfg.training.use_wandb:
         wandb.init(
             project="modular-rnn-ibl",
             dir=cfg.paths.wandb_dir,
             config=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
-            notes="Feedback matrix from Wmv zeroed out, action kernel and feedback are pulsed, action kernel is a moving average",
+            notes=cfg.model.notes[0],
         )
+
         wandb.watch(model, log="gradients", log_freq=200)  # type: ignore
     run_id = get_run_id(cfg.training.use_wandb)
+    log_run_to_registry(cfg, run_id)
 
     if cfg.training.use_wandb:
         run_ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, run_id)

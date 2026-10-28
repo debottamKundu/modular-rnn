@@ -1,0 +1,2 @@
+timestamp,run_id,kappa_kernel,xi_kernel,fb_mode,fb_sparsity,reward_timing,kernel_timing,rank_ff,theta,n_steps,iti
+2026-10-28T11:27:56,13m79c3s,0.9,1.0,zero,1.0,pulse_only,pulse_only,3,0.9,25001,3

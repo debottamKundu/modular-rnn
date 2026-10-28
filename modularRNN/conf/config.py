@@ -23,6 +23,7 @@ class ModelConfig:
     nonlinearity: str = "relu"  # "relu" | "tanh" | "softplus"
     fb_mode: str = "dense"
     fb_sparsity: float = 1.0
+    notes: List[str] = field(default_factory=lambda: ["notes for tracking"])
 
 
 @dataclass

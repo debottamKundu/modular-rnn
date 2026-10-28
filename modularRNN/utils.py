@@ -4,6 +4,9 @@ import torch
 import torch.nn.functional as F
 import tempfile
 import wandb
+import csv
+import os
+from datetime import datetime
 
 NONLINEARITIES = {"relu": F.relu, "tanh": torch.tanh, "softplus": F.softplus}
 
@@ -72,3 +75,28 @@ def validate_config_consistency(cfg):
     assert (
         cfg.model.fb_mode in valid_fb_modes
     ), f"invalid model.fb_mode: {cfg.model.fb_mode}"
+
+
+def log_run_to_registry(cfg, run_id, registry_path="./runs/registry.csv"):
+
+    row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "run_id": run_id,
+        "kappa_kernel": cfg.env.kappa_kernel,
+        "xi_kernel": cfg.env.xi_kernel,
+        "fb_mode": cfg.model.fb_mode,
+        "fb_sparsity": cfg.model.fb_sparsity,
+        "reward_timing": cfg.env.reward_timing,
+        "kernel_timing": cfg.env.kernel_timing,
+        "rank_ff": cfg.model.rank_ff,
+        "theta": cfg.decision.theta,
+        "n_steps": cfg.training.n_steps,
+        "iti": cfg.env.T_iti,
+    }
+    file_exists = os.path.exists(registry_path)
+    os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+    with open(registry_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)

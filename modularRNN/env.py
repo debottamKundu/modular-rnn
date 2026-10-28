@@ -358,7 +358,8 @@ class AsyncClosedLoopEnv:
         self.B, self.device = batch_size, device
         self.T_max, self.T_iti = T_max, T_iti
         self.t_min, self.theta, self.sigma_stim = t_min, theta, sigma_stim
-        self.hold_fb_during_stim = hold_fb_during_stim
+        self.reward_timing = reward_timing
+        self.kernel_timing = kernel_timing
         self.t_quiescence = t_quiescence
         self.use_action_kernel = kappa_kernel != 0.0
         self.kappa_kernel, self.xi_kernel = kappa_kernel, xi_kernel
@@ -390,7 +391,8 @@ class AsyncClosedLoopEnv:
             self.t_min,
             self.theta,
             self.sigma_stim,
-            self.hold_fb_during_stim,
+            self.reward_timing,
+            self.kernel_timing,
             self.t_quiescence,
             self.use_action_kernel,
             self.kappa_kernel,
