@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING
 
@@ -21,8 +21,9 @@ class ModelConfig:
     in_gain: float = 1.0
     sigma_baseline: float = 0.05
     nonlinearity: str = "relu"  # "relu" | "tanh" | "softplus"
-    fb_mode: str = "dense"
-    fb_sparsity: float = 1.0
+    fb_mode: str = "sparse"  # sparse, dense or lowrank, if low rank, same rank as ff
+    fb_sparsity: float = 0.4
+    stim_fb_gain: float = 0.1
     notes: List[str] = field(default_factory=lambda: ["notes for tracking"])
 
 
@@ -36,7 +37,7 @@ class DecisionConfig:
 class EnvConfig:
     batch_size: int = 32
     T_max: int = 100
-    T_iti: int = 3
+    T_iti: int = 10
     sigma_stim: float = 1.0  # stimulus noise amplitude
     hold_fb_during_stim: bool = False
     n_blocks: int = 5  # total blocks/session
@@ -85,8 +86,14 @@ class TrainingConfig:
     device: str = "cpu"  # "cpu" | "mps" | "cuda"
     compile_model: bool = False
     eval_n_trials: int = 20
-    probe_every: int = 1000  # expensive decoding probe cadence
-    probe_cv_folds: int = 3
+    probe_every: int = 1000
+    min_steps_before_stop: int = 10000
+    plateau_patience: int = 10
+    plateau_min_delta: float = 0.002
+    plateau_smoothing_window: int = 10
+    enable_early_stopping: bool = True
+    resume_from: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 @dataclass

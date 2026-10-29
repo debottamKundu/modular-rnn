@@ -1,2 +1,10 @@
 timestamp,run_id,kappa_kernel,xi_kernel,fb_mode,fb_sparsity,reward_timing,kernel_timing,rank_ff,theta,n_steps,iti
 2026-10-28T11:27:56,13m79c3s,0.9,1.0,zero,1.0,pulse_only,pulse_only,3,0.9,25001,3
+2026-10-28T15:31:53,fc8dzrdu,0.9,1.0,sparse,0.4,pulse_only,pulse_only,3,0.9,10001,5
+2026-10-28T19:31:09,fc8dzrdu,0.9,1.0,sparse,0.4,pulse_only,pulse_only,3,0.9,10000,5
+2026-10-28T19:36:20,fc8dzrdu,0.9,1.0,sparse,0.4,pulse_only,pulse_only,3,0.9,20001,5
+2026-10-28T20:09:59,6lxhvvtw,0.4,1.0,sparse,0.4,pulse_only,persist_iti,3,0.9,25001,10
+2026-10-28T23:59:15,smw4m5pn,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
+2026-10-29T00:00:54,6qrpnfgs,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
+2026-10-29T00:01:29,2mqp6mxw,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
+2026-10-29T00:02:22,l7fbsjyd,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10

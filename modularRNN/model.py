@@ -28,6 +28,7 @@ class ModularCTRNN(nn.Module):
         nonlinearity: str = "relu",
         fb_mode: str = "dense",
         fb_sparsity: float = 0.5,
+        stim_fb_gain: float = 0.1,
     ):
         super().__init__()
         self.n_visp, self.n_mos = n_visp, n_mos
@@ -68,28 +69,38 @@ class ModularCTRNN(nn.Module):
         # )
 
         # set sparsity
-        self.W_fb = nn.Parameter(
-            fb_gain * torch.randn(n_visp, n_mos) / math.sqrt(n_mos)
-        )
-        if self.fb_mode == "dense":
-            self.register_buffer("W_fb_mask", torch.ones(n_visp, n_mos))
-        elif self.fb_mode == "zero":
-            self.register_buffer("W_fb_mask", torch.zeros(n_visp, n_mos))
-        elif self.fb_mode == "sparse":
-            mask = (
-                torch.rand(n_visp, n_mos) < self.fb_sparsity
-            ).float()  # fb_sparsity = fraction KEPT nonzero
-            self.register_buffer("W_fb_mask", mask)
+        if self.fb_mode == "lowrank":
+            self.U_fb = nn.Parameter(
+                fb_gain * torch.randn(rank_ff, n_mos) / math.sqrt(rank_ff)
+            )
+            self.V_fb = nn.Parameter(
+                fb_gain * torch.randn(n_visp, rank_ff) / math.sqrt(rank_ff)
+            )
         else:
-            raise ValueError(f"unknown fb_mode: {fb_mode}")
+            self.W_fb = nn.Parameter(
+                fb_gain * torch.randn(n_visp, n_mos) / math.sqrt(n_mos)
+            )
+            if self.fb_mode == "dense":
+                self.register_buffer("W_fb_mask", torch.ones(n_visp, n_mos))
+            elif self.fb_mode == "zero":
+                self.register_buffer("W_fb_mask", torch.zeros(n_visp, n_mos))
+            elif self.fb_mode == "sparse":
+                mask = (
+                    torch.rand(n_visp, n_mos) < self.fb_sparsity
+                ).float()  # fb_sparsity = fraction KEPT nonzero
+                self.register_buffer("W_fb_mask", mask)
+            else:
+                raise ValueError(f"unknown fb_mode: {fb_mode}")
 
         # input weights: hard block structure -- stim -> VISp only
 
         self.W_in_stim_visp = nn.Parameter(
             in_gain * torch.randn(n_visp, n_stim) / math.sqrt(n_stim)
         )
+        # reduce this by stim_fb_gain
+
         self.W_in_fb_visp = nn.Parameter(
-            in_gain * torch.randn(n_visp, n_fb) / math.sqrt(n_fb)
+            stim_fb_gain * torch.randn(n_visp, n_fb) / math.sqrt(n_fb)
         )
 
         self.W_in_fb_mos = nn.Parameter(
@@ -108,7 +119,10 @@ class ModularCTRNN(nn.Module):
         return self.U_ff @ self.V_ff  # (n_mos, n_visp), rank <= rank_ff by construction
 
     def W_mv(self):
-        return self.W_fb * self.W_fb_mask
+        if self.fb_mode == "lowrank":
+            return self.V_fb @ self.U_fb
+        else:
+            return self.W_fb * self.W_fb_mask
 
     def effective_rank_ff(self) -> float:
         with torch.no_grad():

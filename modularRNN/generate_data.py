@@ -38,7 +38,7 @@ def load_checkpoint(ckpt_path, device, fallback_config_path=None):
         sigma_baseline=cfg.model.sigma_baseline,
         nonlinearity=cfg.model.nonlinearity,
         fb_mode=cfg.model.fb_mode,
-        fb_sparsity=cfg.model.sparsity,
+        fb_sparsity=cfg.model.fb_sparsity,
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()

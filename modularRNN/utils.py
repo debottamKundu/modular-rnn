@@ -71,7 +71,7 @@ def validate_config_consistency(cfg):
         cfg.env.kernel_timing in valid_timings
     ), f"invalid env.kernel_timing: {cfg.env.kernel_timing}"
 
-    valid_fb_modes = {"dense", "zero", "sparse"}
+    valid_fb_modes = {"dense", "zero", "sparse", "lowrank"}
     assert (
         cfg.model.fb_mode in valid_fb_modes
     ), f"invalid model.fb_mode: {cfg.model.fb_mode}"
@@ -100,3 +100,37 @@ def log_run_to_registry(cfg, run_id, registry_path="./runs/registry.csv"):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+class PlateauMonitor:
+    """Stops training if a smoothed metric hasn't improved by more than
+    `min_delta` over `patience` evaluation checkpoints"""
+
+    def __init__(self, patience=10, min_delta=0.002, smoothing_window=10):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.smoothing_window = smoothing_window
+        self.values = []
+        self.weights = []
+        self.best = -float("inf")
+        self.steps_since_best = 0
+
+    def update(self, value: float, weight: float, curriculum_at_max: bool) -> bool:
+        self.values.append(value)
+        self.weights.append(max(weight, 1e-8))
+
+        if not curriculum_at_max:
+            self.steps_since_best = 0
+            return False
+
+        v = np.array(self.values[-self.smoothing_window :])
+        w = np.array(self.weights[-self.smoothing_window :])
+        smoothed = float(np.average(v, weights=w))
+
+        if smoothed > self.best + self.min_delta:
+            self.best = smoothed
+            self.steps_since_best = 0
+        else:
+            self.steps_since_best += 1
+
+        return self.steps_since_best >= self.patience

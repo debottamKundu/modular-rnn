@@ -17,6 +17,7 @@ from .losses import compute_losses
 from .congruency import congruency_accuracy_scalars
 from .storage import HiddenStateStore
 from .utils import (
+    PlateauMonitor,
     get_run_id,
     log_run_to_registry,
     set_seed,
@@ -32,6 +33,26 @@ from .utils import (
 #     run_probe_decoding,
 #     plot_probe_decoding,
 # )
+
+
+def save_checkpoint(model, optimizer, step, cfg, run_ckpt_dir, run_id, tag="final"):
+    path = os.path.join(run_ckpt_dir, f"ckpt_{tag}_{step}.pt")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": step,
+            "run_id": run_id,
+            "config": OmegaConf.to_container(cfg, resolve=True),
+        },
+        path,
+    )
+    if cfg.training.use_wandb:
+        art = wandb.Artifact(f"ckpt_{tag}_{run_id}_{step}", type="model")
+        art.add_file(path)
+        wandb.log_artifact(art)
+    print(f"[step {step}] saved checkpoint ({tag}) to {path}")
+    return path
 
 
 def k_schedule(step, cfg):
@@ -76,6 +97,12 @@ def main(cfg: Config):
     os.makedirs(cfg.paths.data_dir, exist_ok=True)
     os.makedirs(cfg.paths.wandb_dir, exist_ok=True)
 
+    plateau_monitor = PlateauMonitor(
+        patience=cfg.training.plateau_patience,
+        min_delta=cfg.training.plateau_min_delta,
+        smoothing_window=cfg.training.plateau_smoothing_window,
+    )
+
     model = ModularCTRNN(
         n_visp=cfg.model.n_visp,
         n_mos=cfg.model.n_mos,
@@ -94,6 +121,7 @@ def main(cfg: Config):
         nonlinearity=cfg.model.nonlinearity,
         fb_mode=cfg.model.fb_mode,
         fb_sparsity=cfg.model.fb_sparsity,
+        stim_fb_gain=cfg.model.stim_fb_gain,
     ).to(device)
 
     # if cfg.training.compile_model and device.type != "mps":
@@ -185,6 +213,7 @@ def main(cfg: Config):
     # )
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_opt_state = copy.deepcopy(optimizer.state_dict())
+    stopped_early = False
 
     for step in range(cfg.training.n_steps):  # to store the last checkpoint
 
@@ -219,7 +248,11 @@ def main(cfg: Config):
 
         L_choice, L_aux, L_switch = compute_losses(results)
         L_rate = torch.stack(rate_terms).mean()
-        L_weight = (model.W_fb**2).sum()
+
+        if model.fb_mode == "lowrank":
+            L_weight = 0
+        else:
+            L_weight = (model.W_fb**2).sum()
         L_total = (
             L_choice
             + cfg.loss.lambda_aux * L_aux
@@ -286,7 +319,8 @@ def main(cfg: Config):
                     "train/chunk_len_dt": chunk_len,
                     "train/teacher_forcing_prob": tf_prob,
                     "diag/W_ff_effective_rank": model.effective_rank_ff(),
-                    "diag/W_fb_norm": model.W_fb.norm().item(),
+                    
+                    # "diag/W_fb_norm": model.W_fb.norm().item(), because low rank
                     "diag/W_vv_specrad": spectral_radius(model.W_vv),
                     "diag/W_mm_specrad": spectral_radius(model.W_mm),
                     "step": step,
@@ -303,19 +337,52 @@ def main(cfg: Config):
             )
 
         if cfg.training.use_wandb and step % cfg.training.ckpt_every == 0:
-            path = os.path.join(run_ckpt_dir, f"ckpt_{step}.pt")
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "step": step,
-                    "config": OmegaConf.to_container(cfg, resolve=True),
-                },
-                path,
+            # path = os.path.join(run_ckpt_dir, f"ckpt_{step}.pt")
+            # torch.save(
+            #     {
+            #         "model": model.state_dict(),
+            #         "optimizer": optimizer.state_dict(),
+            #         "step": step,
+            #         "config": OmegaConf.to_container(cfg, resolve=True),
+            #     },
+            #     path,
+            # )
+            save_checkpoint(
+                model, optimizer, step, cfg, run_ckpt_dir, run_id, tag="periodic"
             )
-            art = wandb.Artifact(f"ckpt_{step}", type="model")
-            art.add_file(path)
-            wandb.log_artifact(art)
+        if cfg.training.enable_early_stopping:
+            curriculum_at_max = chunk_len >= cfg.training.chunk_dt_max
+            should_stop = plateau_monitor.update(
+                acc, weight=n_resolved, curriculum_at_max=curriculum_at_max
+            )
+
+            if should_stop and step >= cfg.training.min_steps_before_stop:
+                print(
+                    f"[step {step}] accuracy plateaued (smoothed, trial-weighted) -- stopping early."
+                )
+                if cfg.training.use_wandb:
+                    wandb.log({"train/early_stopped": 1, "step": step})
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    step,
+                    cfg,
+                    run_ckpt_dir,
+                    run_id,
+                    tag="early_stop_final",
+                )
+                stopped_early = True
+                break
+    if not stopped_early:
+        save_checkpoint(
+            model,
+            optimizer,
+            cfg.training.n_steps - 1,
+            cfg,
+            run_ckpt_dir,
+            run_id,
+            tag="final",
+        )
 
 
 if __name__ == "__main__":
