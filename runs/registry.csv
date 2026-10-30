@@ -8,3 +8,5 @@ timestamp,run_id,kappa_kernel,xi_kernel,fb_mode,fb_sparsity,reward_timing,kernel
 2026-10-29T00:00:54,6qrpnfgs,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
 2026-10-29T00:01:29,2mqp6mxw,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
 2026-10-29T00:02:22,l7fbsjyd,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,25001,10
+2026-10-29T10:45:14,uqi2kt94,0.5,0.2,lowrank,0.4,pulse_only,persist_iti,3,0.85,30001,20
+2026-10-29T12:59:40,ramsfej1,0.0,0.2,dense,0.4,pulse_only,persist_iti,3,0.85,25001,20

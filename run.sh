@@ -17,20 +17,33 @@ set -euo pipefail
 #   "$@"
 
 
+# python -m modularRNN.train \
+#   training.device=cpu training.use_wandb=true training.compile_model=false \
+#   model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=2  model.fb_mode="lowrank" model.stim_fb_gain=0.1 model.notes=["Low matrix feedback, longer ITI, ak is for iti,  feedback is pulsed, ak is ak"]\
+#   env.batch_size=32 \
+#   env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
+#   env.T_max=120 env.T_iti=20 \
+#   env.reward_timing="pulse_only" env.kernel_timing="persist_iti" \
+#   decision.t_min=10 decision.theta=0.85 \
+#   env.kappa_kernel=0.5 env.xi_kernel=0.2 \
+#   training.n_steps=30001 \
+#   training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=3000 \
+#   training.ckpt_every=5000 \
+#   "$@"
+
 python -m modularRNN.train \
   training.device=cpu training.use_wandb=true training.compile_model=false \
-  model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=2  model.fb_mode="lowrank" model.stim_fb_gain=0.1 model.notes=["Low matrix feedback; longer ITI, ak is for iti,  feedback is pulsed, ak is ak"]\
+  model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=1  model.fb_mode="dense" model.stim_fb_gain=0.1 model.notes=["Dense feedback matrix, longer ITI, no feedback"]\
   env.batch_size=32 \
+  env.kappa_kernel=0 \
   env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
   env.T_max=120 env.T_iti=20 \
   env.reward_timing="pulse_only" env.kernel_timing="persist_iti" \
   decision.t_min=10 decision.theta=0.85 \
-  env.kappa_kernel=0.5 env.xi_kernel=0.2 \
-  training.n_steps=30001 \
+  training.n_steps=25001 \
   training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=3000 \
   training.ckpt_every=5000 \
   "$@"
-
 
 # python -m modularRNN.train \
 #   training.device=cpu training.use_wandb=true training.compile_model=false \

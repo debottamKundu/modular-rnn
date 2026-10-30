@@ -85,7 +85,7 @@ class TrainingConfig:
     seed: int = 42
     device: str = "cpu"  # "cpu" | "mps" | "cuda"
     compile_model: bool = False
-    eval_n_trials: int = 20
+    # eval_n_trials: int = 20
     probe_every: int = 1000
     min_steps_before_stop: int = 10000
     plateau_patience: int = 10
@@ -94,6 +94,12 @@ class TrainingConfig:
     enable_early_stopping: bool = True
     resume_from: Optional[str] = None
     run_id: Optional[str] = None
+    eval_every: int = 1000
+    eval_n_dt_steps: int = 5000
+    eval_batch_size: int = 128
+    eval_plateau_patience: int = 2
+    eval_plateau_min_delta: float = 0.01
+    eval_plateau_smoothing_window: int = 5
 
 
 @dataclass

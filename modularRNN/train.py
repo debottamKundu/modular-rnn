@@ -3,6 +3,7 @@ import copy
 import tempfile
 import hydra
 from matplotlib import pyplot as plt
+import numpy as np
 import torch
 
 torch.autograd.set_detect_anomaly(True)
@@ -24,6 +25,7 @@ from .utils import (
     spectral_radius,
     validate_config_consistency,
 )
+from .eval import run_eval_rollout, accuracy_on_low_contrast_incongruent
 
 # from eval import (
 #     make_eval_env,
@@ -101,6 +103,12 @@ def main(cfg: Config):
         patience=cfg.training.plateau_patience,
         min_delta=cfg.training.plateau_min_delta,
         smoothing_window=cfg.training.plateau_smoothing_window,
+    )
+
+    eval_plateau_monitor = PlateauMonitor(
+        patience=cfg.training.eval_plateau_patience,
+        min_delta=cfg.training.eval_plateau_min_delta,
+        smoothing_window=cfg.training.eval_plateau_smoothing_window,
     )
 
     model = ModularCTRNN(
@@ -319,7 +327,6 @@ def main(cfg: Config):
                     "train/chunk_len_dt": chunk_len,
                     "train/teacher_forcing_prob": tf_prob,
                     "diag/W_ff_effective_rank": model.effective_rank_ff(),
-                    
                     # "diag/W_fb_norm": model.W_fb.norm().item(), because low rank
                     "diag/W_vv_specrad": spectral_radius(model.W_vv),
                     "diag/W_mm_specrad": spectral_radius(model.W_mm),
@@ -334,6 +341,62 @@ def main(cfg: Config):
                 f"L_aux={L_aux.item():.4f} L_switch={L_switch.item():.4f} | acc={acc:.3f} "
                 f"no_resp={no_resp:.3f} repeat={repeat_rate if repeat_rate is None else round(repeat_rate,3)} "
                 f"| grad_norm={grad_norm.item():.3f}"
+            )
+
+        if step % cfg.training.eval_every == 0 and step > 0:
+            eval_results = run_eval_rollout(
+                model,
+                plan_gen,
+                device,
+                cfg.env,
+                cfg.decision,
+                n_steps=cfg.training.eval_n_dt_steps,
+                batch_size=cfg.training.eval_batch_size,
+            )
+            eval_acc, eval_n = accuracy_on_low_contrast_incongruent(
+                eval_results, target_contrast=0.0625
+            )
+
+            log_payload = {
+                "eval/acc_lowcontrast_incongruent": eval_acc,
+                "eval/n_lowcontrast_incongruent": eval_n,
+                "step": step,
+            }
+            if cfg.training.use_wandb:
+                wandb.log(log_payload)
+            else:
+                print(
+                    f"[eval @ step {step}] acc_0.0625_incongruent={eval_acc:.3f} (n={eval_n})"
+                )
+
+            if not np.isnan(eval_acc):
+                curriculum_at_max = chunk_len >= cfg.training.chunk_dt_max
+                should_stop_eval = eval_plateau_monitor.update(
+                    eval_acc, weight=eval_n, curriculum_at_max=curriculum_at_max
+                )
+
+                if should_stop_eval and step >= cfg.training.min_steps_before_stop:
+                    print(
+                        f"[step {step}] eval accuracy on low-contrast incongruent trials plateaued -- stopping early."
+                    )
+                    if cfg.training.use_wandb:
+                        wandb.log(
+                            {"train/early_stopped_eval_criterion": 1, "step": step}
+                        )
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        step,
+                        cfg,
+                        run_ckpt_dir,
+                        run_id,
+                        tag="early_stop_eval",
+                    )
+                    stopped_early = True
+                    break
+        else:
+            print(
+                f"[eval @ step {step}] skipped plateau check -- only {eval_n} trials (< min_trials)"
             )
 
         if cfg.training.use_wandb and step % cfg.training.ckpt_every == 0:
