@@ -27,6 +27,9 @@ class TrialResult:
     session_id: torch.Tensor
     action_kernel: torch.Tensor
     batch_idx: torch.Tensor
+    full_r_v: Optional[torch.Tensor] = None
+    full_r_c: Optional[torch.Tensor] = None
+    full_r_p: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -231,7 +234,8 @@ def step_dt(
         x_fb_t = reward_component
 
     h_new = model.step(state.h, x_stim_t, x_fb_t)
-    z, g, r_v, r_m = model.readout(h_new)
+    # z, g, r_v, r_m = model.readout(h_new)
+    z, g, r_v, r_c, r_p = model.readout(h_new)
 
     accumulate_aux = in_decision & (state.phase_step >= t_quiescence)
     aux_accum = state.aux_accum + g * accumulate_aux.float()
@@ -325,8 +329,18 @@ def step_dt(
     if iti_finished.any():
         new_state = _fetch_new_trials(new_state, plan, plan_gen, iti_finished, device)
 
+    # if return_hidden:
+    #     return new_state, result, r_v.detach(), r_m.detach(), x_stim_t.detach()
+
     if return_hidden:
-        return new_state, result, r_v.detach(), r_m.detach(), x_stim_t.detach()
+        return (
+            new_state,
+            result,
+            r_v.detach(),
+            r_c.detach(),
+            r_p.detach(),
+            x_stim_t.detach(),
+        )
 
     return new_state, result
 
@@ -401,8 +415,8 @@ class AsyncClosedLoopEnv:
             return_hidden,
         )
         if return_hidden:
-            self.state, result, r_v, r_m, x_stim = out
-            return result, r_v, r_m, x_stim
+            self.state, result, r_v, r_c, r_p, x_stim = out
+            return result, r_v, r_c, r_p, x_stim
         else:
             self.state, result = out
             return result

@@ -5,25 +5,48 @@ from omegaconf import MISSING
 
 
 @dataclass
+class ConnectionConfig:
+    mode: str = "dense"  # "dense" | "sparse" | "zero" | "lowrank"
+    gain: float = 0.5
+    sparsity: float = 1.0  # used only if mode == "sparse"
+    rank: int = 3  # u
+
+
+@dataclass
 class ModelConfig:
-    n_visp: int = 64
-    n_mos: int = 64
+    n_v: int = 64
+    n_c: int = 64
+    n_p: int = 32
     n_stim: int = 2
-    n_fb: int = 2  # 1 for reward only, 2 for reward+kernel
-    rank_ff: int = 5
+    n_fb: int = 2
     dt: float = 10.0
-    tau_visp_range: List[float] = field(default_factory=lambda: [20.0, 60.0])
-    tau_mos_range: List[float] = field(default_factory=lambda: [100.0, 400.0])
+    tau_v_range: List[float] = field(default_factory=lambda: [20.0, 60.0])
+    tau_c_range: List[float] = field(default_factory=lambda: [100.0, 250.0])
+    tau_p_range: List[float] = field(default_factory=lambda: [250.0, 600.0])
     learnable_tau: bool = False
     rec_gain: float = 1.2
-    ff_gain: float = 0.4
-    fb_gain: float = 0.4
     in_gain: float = 1.0
     sigma_baseline: float = 0.05
-    nonlinearity: str = "relu"  # "relu" | "tanh" | "softplus"
-    fb_mode: str = "sparse"  # sparse, dense or lowrank, if low rank, same rank as ff
-    fb_sparsity: float = 0.4
-    stim_fb_gain: float = 0.1
+    nonlinearity: str = "relu"
+
+    conn_c_from_v: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="lowrank", gain=0.4, rank=3)
+    )
+    conn_v_from_c: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="dense", gain=0.4)
+    )
+    conn_p_from_v: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="zero")
+    )
+    conn_v_from_p: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="dense", gain=0.4)
+    )
+    conn_p_from_c: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="dense", gain=0.4)
+    )
+    conn_c_from_p: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(mode="dense", gain=0.4)
+    )
     notes: List[str] = field(default_factory=lambda: ["notes for tracking"])
 
 

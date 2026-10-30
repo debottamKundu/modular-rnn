@@ -19,45 +19,40 @@ set -euo pipefail
 
 # python -m modularRNN.train \
 #   training.device=cpu training.use_wandb=true training.compile_model=false \
-#   model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=2  model.fb_mode="lowrank" model.stim_fb_gain=0.1 model.notes=["Low matrix feedback, longer ITI, ak is for iti,  feedback is pulsed, ak is ak"]\
+#   model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=1  model.fb_mode="dense" model.stim_fb_gain=0.1 model.notes=["Dense feedback matrix, longer ITI, no feedback"]\
 #   env.batch_size=32 \
+#   env.kappa_kernel=0 \
 #   env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
 #   env.T_max=120 env.T_iti=20 \
 #   env.reward_timing="pulse_only" env.kernel_timing="persist_iti" \
 #   decision.t_min=10 decision.theta=0.85 \
-#   env.kappa_kernel=0.5 env.xi_kernel=0.2 \
-#   training.n_steps=30001 \
+#   training.n_steps=25001 \
 #   training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=3000 \
 #   training.ckpt_every=5000 \
 #   "$@"
 
+# maybe we can taper off the kernel input.
+
 python -m modularRNN.train \
-  training.device=cpu training.use_wandb=true training.compile_model=false \
-  model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=1  model.fb_mode="dense" model.stim_fb_gain=0.1 model.notes=["Dense feedback matrix, longer ITI, no feedback"]\
-  env.batch_size=32 \
-  env.kappa_kernel=0 \
+  training.device=cpu training.use_wandb=True training.compile_model=false \
+  training.n_steps=20001 training.enable_early_stopping=false \
+  model.n_v=32 model.n_c=32 model.n_p=64 \
+  model.n_stim=2 model.n_fb=2 \
+  model.tau_v_range="[20.0,60.0]" model.tau_c_range="[60.0,80.0]" model.tau_p_range="[100.0,120.0]" \
+  model.conn_c_from_v.mode=lowrank model.conn_c_from_v.rank=5 model.conn_c_from_v.gain=0.4 \
+  model.conn_v_from_c.mode=lowrank model.conn_v_from_c.rank=5 model.conn_v_from_c.gain=0.4 \
+  model.conn_p_from_v.mode=zero \
+  model.conn_v_from_p.mode=dense model.conn_v_from_p.gain=0.4 \
+  model.conn_p_from_c.mode=lowrank model.conn_p_from_c.rank=5 model.conn_p_from_c.gain=0.4 \
+  model.conn_c_from_p.mode=dense model.conn_c_from_p.gain=0.4 \
+  env.batch_size=32 env.n_blocks=6 env.n_unbiased_blocks=1 \
   env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
   env.T_max=120 env.T_iti=20 \
   env.reward_timing="pulse_only" env.kernel_timing="persist_iti" \
-  decision.t_min=10 decision.theta=0.85 \
-  training.n_steps=25001 \
+  env.kappa_kernel=0.5 env.xi_kernel=0.2 \
+  decision.t_min=15 decision.theta=0.9 \
   training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=3000 \
   training.ckpt_every=5000 \
-  "$@"
-
-# python -m modularRNN.train \
-#   training.device=cpu training.use_wandb=true training.compile_model=false \
-#   model.n_visp=32 model.n_mos=32 model.rank_ff=3 model.n_fb=2  model.fb_mode="zero" model.notes=["Zero feedback matrix, ak is for iti,  feedback is pulsed, ak is moving average"]\
-#   env.batch_size=32 \
-#   env.block_len_mean=60 env.block_len_min=20 env.block_len_max=100 \
-#   env.T_max=100 env.T_iti=3 \
-#   env.reward_timing="pulse_only" env.kernel_timing="persist_iti"
-#   decision.t_min=10 decision.theta=0.9 \
-#   env.kappa_kernel=0.5 env.xi_kernel=0.2 \
-#   training.n_steps=25001 \
-#   training.chunk_dt_start=150 training.chunk_dt_growth_every=500 training.chunk_dt_max=1000 \
-#   training.ckpt_every=5000 \
-#   "$@"
 
 
 

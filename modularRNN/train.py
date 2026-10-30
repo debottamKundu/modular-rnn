@@ -11,7 +11,7 @@ import wandb
 from omegaconf import DictConfig, OmegaConf
 
 from .conf.config import Config
-from .model import ModularCTRNN
+from .model import ModularCTRNN3
 from .env import AsyncClosedLoopEnv
 from .generators import SessionPlanGenerator
 from .losses import compute_losses
@@ -78,66 +78,45 @@ def anneal(step, n_steps, start, end, frac):
     return start + t * (end - start)
 
 
+def build_conn_specs(cfg):
+    def spec(c):
+        return dict(mode=c.mode, gain=c.gain, sparsity=c.sparsity, rank=c.rank)
+
+    return {
+        ("c", "v"): spec(cfg.model.conn_c_from_v),
+        ("v", "c"): spec(cfg.model.conn_v_from_c),
+        ("p", "v"): spec(cfg.model.conn_p_from_v),
+        ("v", "p"): spec(cfg.model.conn_v_from_p),
+        ("p", "c"): spec(cfg.model.conn_p_from_c),
+        ("c", "p"): spec(cfg.model.conn_c_from_p),
+    }
+
+
 @hydra.main(config_path="conf", config_name="config", version_base=None)
-def main(cfg: Config):
-    print(OmegaConf.to_yaml(cfg))
+def main(cfg):
     validate_config_consistency(cfg)
     set_seed(cfg.training.seed)
     device = torch.device(cfg.training.device)
 
-    if device.type == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "Config requested training.device=cuda, but torch.cuda.is_available() "
-                "is False. Check CUDA drivers / PyTorch CUDA build before proceeding."
-            )
-        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        print(f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        torch.set_float32_matmul_precision("high")
-
-    os.makedirs(cfg.paths.checkpoint_dir, exist_ok=True)
-    os.makedirs(cfg.paths.data_dir, exist_ok=True)
-    os.makedirs(cfg.paths.wandb_dir, exist_ok=True)
-
-    plateau_monitor = PlateauMonitor(
-        patience=cfg.training.plateau_patience,
-        min_delta=cfg.training.plateau_min_delta,
-        smoothing_window=cfg.training.plateau_smoothing_window,
-    )
-
-    eval_plateau_monitor = PlateauMonitor(
-        patience=cfg.training.eval_plateau_patience,
-        min_delta=cfg.training.eval_plateau_min_delta,
-        smoothing_window=cfg.training.eval_plateau_smoothing_window,
-    )
-
-    model = ModularCTRNN(
-        n_visp=cfg.model.n_visp,
-        n_mos=cfg.model.n_mos,
+    model = ModularCTRNN3(
+        n_v=cfg.model.n_v,
+        n_c=cfg.model.n_c,
+        n_p=cfg.model.n_p,
         n_stim=cfg.model.n_stim,
         n_fb=cfg.model.n_fb,
-        rank_ff=cfg.model.rank_ff,
         dt=cfg.model.dt,
-        tau_visp_range=cfg.model.tau_visp_range,
-        tau_mos_range=cfg.model.tau_mos_range,
+        tau_v_range=cfg.model.tau_v_range,
+        tau_c_range=cfg.model.tau_c_range,
+        tau_p_range=cfg.model.tau_p_range,
         learnable_tau=cfg.model.learnable_tau,
         rec_gain=cfg.model.rec_gain,
-        ff_gain=cfg.model.ff_gain,
-        fb_gain=cfg.model.fb_gain,
         in_gain=cfg.model.in_gain,
         sigma_baseline=cfg.model.sigma_baseline,
         nonlinearity=cfg.model.nonlinearity,
-        fb_mode=cfg.model.fb_mode,
-        fb_sparsity=cfg.model.fb_sparsity,
-        stim_fb_gain=cfg.model.stim_fb_gain,
+        conn_specs=build_conn_specs(cfg),
     ).to(device)
 
-    # if cfg.training.compile_model and device.type != "mps":
-    #     model = torch.compile(model)
-
-    if cfg.training.compile_model and device.type == "cuda":
-        model.step = torch.compile(model.step)  # , mode="reduce-overhead")
-        model.readout = torch.compile(model.readout)  # , mode="reduce-overhead")
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
 
     plan_gen = SessionPlanGenerator(
         n_blocks=cfg.env.n_blocks,
@@ -149,12 +128,6 @@ def main(cfg: Config):
         possible_contrasts=cfg.env.contrasts,
         device=device,
     )
-    assert (cfg.env.kappa_kernel != 0.0) == (cfg.model.n_fb == 2), (
-        f"Inconsistent config: env.kappa_kernel={cfg.env.kappa_kernel} implies "
-        f"use_action_kernel={cfg.env.kappa_kernel != 0.0}, but model.n_fb={cfg.model.n_fb} "
-        f"(must be 2 if action kernel is enabled, 1 if disabled)."
-    )
-
     env = AsyncClosedLoopEnv(
         model=model,
         plan_gen=plan_gen,
@@ -172,59 +145,55 @@ def main(cfg: Config):
         xi_kernel=cfg.env.xi_kernel,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
-
     if cfg.training.use_wandb:
         wandb.init(
             project="modular-rnn-ibl",
             dir=cfg.paths.wandb_dir,
-            config=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
-            notes=cfg.model.notes[0],
+            config=OmegaConf.to_container(cfg, resolve=True),
         )
+        wandb.watch(model, log="gradients", log_freq=200)
 
-        wandb.watch(model, log="gradients", log_freq=200)  # type: ignore
     run_id = get_run_id(cfg.training.use_wandb)
-    log_run_to_registry(cfg, run_id)
-
-    if cfg.training.use_wandb:
-        run_ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, run_id)
-        run_data_dir = os.path.join(cfg.paths.data_dir, run_id)
-    else:
-        # smoke-test
-        run_ckpt_dir = tempfile.mkdtemp(
-            prefix=f"{run_id}_ckpt_", dir=cfg.paths.checkpoint_dir
-        )
-        run_data_dir = tempfile.mkdtemp(
-            prefix=f"{run_id}_data_", dir=cfg.paths.data_dir
-        )
-        print(
-            f"[no-wandb run] checkpoints/data are temporary, written to:\n  {run_ckpt_dir}\n  {run_data_dir}"
-        )
+    run_ckpt_dir = os.path.join(cfg.paths.checkpoint_dir, run_id)
     os.makedirs(run_ckpt_dir, exist_ok=True)
-    os.makedirs(run_data_dir, exist_ok=True)
 
-    # hidden_store = None
-    # if cfg.training.store_hidden_during_training:
-    #     hidden_store = HiddenStateStore(
-    #         os.path.join(run_data_dir, "hidden_states_train.zarr"),
-    #         cfg.model.n_visp,
-    #         cfg.model.n_mos,
-    #         cfg.model.n_stim,
-    #         store_full_traces=True,
-    #         t_iti=cfg.env.T_iti,
-    #     )
+    plateau_monitor = PlateauMonitor(
+        patience=cfg.training.plateau_patience,
+        min_delta=cfg.training.plateau_min_delta,
+        smoothing_window=cfg.training.plateau_smoothing_window,
+    )
 
     env.reset()
-
-    # eval_env = make_eval_env(
-    #     model, plan_gen, cfg.env.eval_batch_size, device, cfg.env, cfg.decision
-    # )
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_opt_state = copy.deepcopy(optimizer.state_dict())
     stopped_early = False
+    conn_edges = [
+        ("c", "v"),
+        ("v", "c"),
+        ("p", "v"),
+        ("v", "p"),
+        ("p", "c"),
+        ("c", "p"),
+    ]
 
-    for step in range(cfg.training.n_steps):  # to store the last checkpoint
+    def save_checkpoint(step, tag="periodic"):
+        path = os.path.join(run_ckpt_dir, f"ckpt_{tag}_{step}.pt")
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "step": step,
+                "run_id": run_id,
+                "config": OmegaConf.to_container(cfg, resolve=True),
+            },
+            path,
+        )
+        if cfg.training.use_wandb:
+            art = wandb.Artifact(f"ckpt_{tag}_{run_id}_{step}", type="model")
+            art.add_file(path)
+            wandb.log_artifact(art)
 
+    for step in range(cfg.training.n_steps):
         chunk_len = chunk_dt_schedule(step, cfg)
         tf_prob = anneal(
             step,
@@ -240,27 +209,16 @@ def main(cfg: Config):
             if res is not None:
                 results.append(res)
             rate_terms.append((model.phi(env.h) ** 2).mean())
-
-        assert env.h is not None
-        # env.h = env.h.detach()  # truncated BPTT boundary
         env.detach_state()
 
         if len(results) == 0:
-            if cfg.training.use_wandb:
-                wandb.log({"train/empty_chunk": 1, "step": step})
-            else:
-                print(
-                    f"step {step:5d} | chunk_len={chunk_len} | no trials resolved this chunk"
-                )
             continue
 
         L_choice, L_aux, L_switch = compute_losses(results)
         L_rate = torch.stack(rate_terms).mean()
-
-        if model.fb_mode == "lowrank":
-            L_weight = 0
-        else:
-            L_weight = (model.W_fb**2).sum()
+        L_weight = sum(
+            model.connections[f"{d}_from_{s}"]().pow(2).sum() for d, s in conn_edges
+        )
         L_total = (
             L_choice
             + cfg.loss.lambda_aux * L_aux
@@ -278,20 +236,10 @@ def main(cfg: Config):
         if not torch.isfinite(L_total) or not torch.isfinite(grad_norm):
             model.load_state_dict(last_good_state)
             optimizer.load_state_dict(last_good_opt_state)
-            env.zero_hidden_state()
             env.reset()
-            msg = (
-                f"[step {step}] NaN/Inf detected -- rolled back to last good checkpoint"
-            )
-            (
-                print(msg)
-                if not cfg.training.use_wandb
-                else wandb.log({"train/nan_rollback": 1, "step": step})
-            )
             continue
 
         optimizer.step()
-
         if step % 50 == 0:
             last_good_state = copy.deepcopy(model.state_dict())
             last_good_opt_state = copy.deepcopy(optimizer.state_dict())
@@ -299,153 +247,44 @@ def main(cfg: Config):
         all_choice = torch.cat([r.choice for r in results])
         all_correct = torch.cat([r.correct_label for r in results])
         all_timed_out = torch.cat([r.timed_out for r in results])
-        has_prev = torch.cat([r.has_prev_choice for r in results])
         acc = (all_choice == all_correct).float().mean().item()
-        no_resp = all_timed_out.float().mean().item()
-        repeat_rate = None
-        if has_prev.any():
-            prev_cat = torch.cat([r.prev_model_choice for r in results]).long()
-            repeat_rate = (
-                (all_choice[has_prev] == prev_cat[has_prev]).float().mean().item()
-            )
-        congr_scalars = congruency_accuracy_scalars(results, cfg.env.contrasts)
         n_resolved = len(all_choice)
 
         if cfg.training.use_wandb:
-            wandb.log(
-                {
-                    "train/L_total": L_total.item(),
-                    "train/L_choice": L_choice.item(),
-                    "train/L_aux": L_aux.item(),
-                    "train/L_rate": L_rate.item(),
-                    "train/L_switch": L_switch.item(),
-                    "train/grad_norm": grad_norm.item(),
-                    "train/accuracy": acc,
-                    "train/no_response_rate": no_resp,
-                    "train/repeat_rate": repeat_rate,
-                    "train/n_resolved_trials": n_resolved,
-                    "train/chunk_len_dt": chunk_len,
-                    "train/teacher_forcing_prob": tf_prob,
-                    "diag/W_ff_effective_rank": model.effective_rank_ff(),
-                    # "diag/W_fb_norm": model.W_fb.norm().item(), because low rank
-                    "diag/W_vv_specrad": spectral_radius(model.W_vv),
-                    "diag/W_mm_specrad": spectral_radius(model.W_mm),
-                    "step": step,
-                    "congruency": congr_scalars,
-                }
-            )
-        else:
-            print(
-                f"step {step:5d} | chunk_dt={chunk_len:4d} | n_resolved={n_resolved:3d} | "
-                f"L_total={L_total.item():.4f} L_choice={L_choice.item():.4f} "
-                f"L_aux={L_aux.item():.4f} L_switch={L_switch.item():.4f} | acc={acc:.3f} "
-                f"no_resp={no_resp:.3f} repeat={repeat_rate if repeat_rate is None else round(repeat_rate,3)} "
-                f"| grad_norm={grad_norm.item():.3f}"
-            )
-
-        if step % cfg.training.eval_every == 0 and step > 0:
-            eval_results = run_eval_rollout(
-                model,
-                plan_gen,
-                device,
-                cfg.env,
-                cfg.decision,
-                n_steps=cfg.training.eval_n_dt_steps,
-                batch_size=cfg.training.eval_batch_size,
-            )
-            eval_acc, eval_n = accuracy_on_low_contrast_incongruent(
-                eval_results, target_contrast=0.0625
-            )
-
-            log_payload = {
-                "eval/acc_lowcontrast_incongruent": eval_acc,
-                "eval/n_lowcontrast_incongruent": eval_n,
+            log_dict = {
+                "train/L_total": L_total.item(),
+                "train/L_choice": L_choice.item(),
+                "train/L_aux": L_aux.item(),
+                "train/L_rate": L_rate.item(),
+                "train/L_switch": L_switch.item(),
+                "train/grad_norm": grad_norm.item(),
+                "train/accuracy": acc,
+                "train/no_response_rate": all_timed_out.float().mean().item(),
+                "train/n_resolved_trials": n_resolved,
+                "train/chunk_len_dt": chunk_len,
                 "step": step,
             }
-            if cfg.training.use_wandb:
-                wandb.log(log_payload)
-            else:
-                print(
-                    f"[eval @ step {step}] acc_0.0625_incongruent={eval_acc:.3f} (n={eval_n})"
-                )
-
-            if not np.isnan(eval_acc):
-                curriculum_at_max = chunk_len >= cfg.training.chunk_dt_max
-                should_stop_eval = eval_plateau_monitor.update(
-                    eval_acc, weight=eval_n, curriculum_at_max=curriculum_at_max
-                )
-
-                if should_stop_eval and step >= cfg.training.min_steps_before_stop:
-                    print(
-                        f"[step {step}] eval accuracy on low-contrast incongruent trials plateaued -- stopping early."
-                    )
-                    if cfg.training.use_wandb:
-                        wandb.log(
-                            {"train/early_stopped_eval_criterion": 1, "step": step}
-                        )
-                    save_checkpoint(
-                        model,
-                        optimizer,
-                        step,
-                        cfg,
-                        run_ckpt_dir,
-                        run_id,
-                        tag="early_stop_eval",
-                    )
-                    stopped_early = True
-                    break
-        else:
-            print(
-                f"[eval @ step {step}] skipped plateau check -- only {eval_n} trials (< min_trials)"
-            )
+            for d, s in conn_edges:
+                log_dict[f"diag/rank_{d}_from_{s}"] = model.effective_rank(d, s)
+                log_dict[f"diag/norm_{d}_from_{s}"] = model.conn_norm(d, s)
+            wandb.log(log_dict)
 
         if cfg.training.use_wandb and step % cfg.training.ckpt_every == 0:
-            # path = os.path.join(run_ckpt_dir, f"ckpt_{step}.pt")
-            # torch.save(
-            #     {
-            #         "model": model.state_dict(),
-            #         "optimizer": optimizer.state_dict(),
-            #         "step": step,
-            #         "config": OmegaConf.to_container(cfg, resolve=True),
-            #     },
-            #     path,
-            # )
-            save_checkpoint(
-                model, optimizer, step, cfg, run_ckpt_dir, run_id, tag="periodic"
-            )
+            save_checkpoint(step, tag="periodic")
+
         if cfg.training.enable_early_stopping:
             curriculum_at_max = chunk_len >= cfg.training.chunk_dt_max
             should_stop = plateau_monitor.update(
                 acc, weight=n_resolved, curriculum_at_max=curriculum_at_max
             )
-
             if should_stop and step >= cfg.training.min_steps_before_stop:
-                print(
-                    f"[step {step}] accuracy plateaued (smoothed, trial-weighted) -- stopping early."
-                )
-                if cfg.training.use_wandb:
-                    wandb.log({"train/early_stopped": 1, "step": step})
-                save_checkpoint(
-                    model,
-                    optimizer,
-                    step,
-                    cfg,
-                    run_ckpt_dir,
-                    run_id,
-                    tag="early_stop_final",
-                )
+                save_checkpoint(step, tag="early_stop_final")
                 stopped_early = True
                 break
+
     if not stopped_early:
-        save_checkpoint(
-            model,
-            optimizer,
-            cfg.training.n_steps - 1,
-            cfg,
-            run_ckpt_dir,
-            run_id,
-            tag="final",
-        )
+        save_checkpoint(cfg.training.n_steps - 1, tag="final")
+    log_run_to_registry(cfg, run_id)
 
 
 if __name__ == "__main__":

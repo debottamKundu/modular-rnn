@@ -8,7 +8,6 @@ from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
-from .generate_data import run_and_save_multi_session
 
 # ---------------------------------------------------------------------------
 # 1. Accuracy, split by contrast and congruence
@@ -19,7 +18,7 @@ def load_and_pool_sessions(session_paths, pad_to=None):
     """Loads multiple single-session zarr stores and concatenates them along
     the trial axis, keeping a session_id-like grouping column so pooled
     decoding can still respect session boundaries if needed (e.g. grouped CV)."""
-    all_meta, all_r_v, all_r_m = [], [], []
+    all_meta, all_r_v, all_r_c, all_r_p = [], [], [], []
 
     if pad_to is None:
         pad_to = 0
@@ -33,7 +32,7 @@ def load_and_pool_sessions(session_paths, pad_to=None):
             {
                 f: store[f][:]
                 for f in store.array_keys()
-                if f not in ("full_r_v", "full_r_m", "full_x_stim")
+                if f not in ("full_r_v", "full_r_c", "full_r_p", "full_x_stim")
             }
         )
         meta["session_id"] = i
@@ -41,20 +40,26 @@ def load_and_pool_sessions(session_paths, pad_to=None):
         all_meta.append(meta)
 
         r_v = store["full_r_v"][:]
-        r_m = store["full_r_m"][:]
+        r_c = store["full_r_c"][:]
+        r_p = store["full_r_p"][:]
         pad_v = pad_to - r_v.shape[1]
-        pad_m = pad_to - r_m.shape[1]
+        pad_c = pad_to - r_c.shape[1]
+        pad_p = pad_to - r_p.shape[1]
         if pad_v > 0:
             r_v = np.pad(r_v, ((0, 0), (0, pad_v), (0, 0)))
-        if pad_m > 0:
-            r_m = np.pad(r_m, ((0, 0), (0, pad_m), (0, 0)))
+        if pad_c > 0:
+            r_c = np.pad(r_c, ((0, 0), (0, pad_c), (0, 0)))
+        if pad_p > 0:
+            r_p = np.pad(r_p, ((0, 0), (0, pad_p), (0, 0)))
         all_r_v.append(r_v)
-        all_r_m.append(r_m)
+        all_r_c.append(r_c)
+        all_r_p.append(r_p)
 
     meta_df = pd.concat(all_meta, ignore_index=True)
     r_v = np.concatenate(all_r_v, axis=0)
-    r_m = np.concatenate(all_r_m, axis=0)
-    return meta_df, r_v, r_m
+    r_c = np.concatenate(all_r_c, axis=0)
+    r_p = np.concatenate(all_r_p, axis=0)
+    return meta_df, r_v, r_c, r_p
 
 
 def add_outcome_and_congruency_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -357,123 +362,6 @@ def _cv_score(X, y, task, cv=5, n_shuffles=200, seed=0):
     return real_scores, null_scores.mean(), null_scores.std(), fold_scores
 
 
-def decode_module_specificity(
-    r_v,
-    r_m,
-    meta_df,
-    trace_len,
-    epoch_fracs=(0, 0.2, 0.5, 0.8, 1.0),
-    t_iti=None,
-    cv=5,
-    n_shuffles=20,
-    iti_offset=5,
-):
-    """
-    r_v, r_m: (n_trials, T_padded, n_units) full traces.
-    trace_len: (n_trials,) real (unpadded) length per trial, e.g. meta_df['trace_len'].
-    epoch_fracs: fractions of each trial's OWN decision-phase length at which
-        to sample a timepoint (e.g. 0.2 = 20% into decision, 1.0 = right at
-        commit). A fixed ITI-relative extra point ('post_feedback') is added
-        if t_iti is given.
-
-    Decodes, at each epoch, from VISp-only and MOs-only activity separately:
-      - stimulus (signed contrast)  -- expected: VISp >> MOs, especially early
-      - choice                      -- expected: MOs >> VISp, especially late
-      - block/prior identity        -- expected: present in both to some
-                                         degree, MOs plausibly earlier/stronger
-    Returns a long-format DataFrame, one row per (epoch, module, target).
-    """
-    n_trials = r_v.shape[0]
-    rt = meta_df["rt"].values
-    signed_stim = (meta_df["stim_side"] * meta_df["contrast"]).values
-    choice = meta_df["choice"].values
-    block_label = (meta_df["block_bias"] > 0.5).astype(int).values
-    committed = (meta_df["timed_out"] == 0).values
-    non_zero_stim_mask = meta_df["contrast"] != 0
-
-    records = []
-    epoch_names = [f"decision_{int(f*100)}pct" for f in epoch_fracs]
-
-    for frac, epoch_name in zip(epoch_fracs, epoch_names):
-        # per-trial timepoint: a fraction of THIS TRIAL's own decision length (rt+1)
-        t_idx = np.clip((rt * frac).astype(int), 0, None)
-        t_idx = np.minimum(t_idx, trace_len.astype(int) - 1)
-
-        X_v = r_v[np.arange(n_trials), t_idx, :]
-        X_m = r_m[np.arange(n_trials), t_idx, :]
-
-        mask = committed  # only meaningful for committed trials
-        for target_name, y, task in [
-            ("stimulus", signed_stim, "regression"),
-            ("choice", choice, "classification"),
-            ("prior_block", block_label, "classification"),
-        ]:
-            for module_name, X in [("VISp", X_v), ("MOs", X_m)]:
-
-                if target_name == "stimulus":
-                    mask = committed & non_zero_stim_mask
-                real_scores, null_mean, null_std, fold_scores = _cv_score(
-                    X[mask], y[mask], task, cv, n_shuffles
-                )
-                records.append(
-                    {
-                        "epoch": epoch_name,
-                        "module": module_name,
-                        "target": target_name,
-                        "score": real_scores,
-                        "null_mean": null_mean,
-                        "null_std": null_std,
-                        "above_null": (
-                            (real_scores - null_mean) / null_std
-                            if null_std > 0
-                            else np.nan
-                        ),
-                        "fold_scores": fold_scores,
-                    }
-                )
-
-    if t_iti is not None:
-        # t_idx = np.minimum(
-        #     trace_len.astype(int) - 1, trace_len.astype(int) - 1
-        # )  # last step (post-feedback)
-        rt = meta_df["rt"].values
-        if iti_offset is None:
-            t_idx = (
-                trace_len.astype(int) - 1
-            )  # last ITI step (unchanged default behavior)
-        else:
-            t_idx = np.clip(rt + 1 + iti_offset, 0, trace_len.astype(int) - 1)
-        X_v = r_v[np.arange(n_trials), t_idx, :]
-        X_m = r_m[np.arange(n_trials), t_idx, :]
-        for target_name, y, task in [
-            ("stimulus", signed_stim, "regression"),
-            ("choice", choice, "classification"),
-            ("prior_block", block_label, "classification"),
-        ]:
-            for module_name, X in [("VISp", X_v), ("MOs", X_m)]:
-                real_scores, null_mean, null_std, fold_scores = _cv_score(
-                    X[committed], y[committed], task, cv, n_shuffles
-                )
-                records.append(
-                    {
-                        "epoch": "post_feedback",
-                        "module": module_name,
-                        "target": target_name,
-                        "score": real_scores,
-                        "null_mean": null_mean,
-                        "null_std": null_std,
-                        "above_null": (
-                            (real_scores - null_mean) / null_std
-                            if null_std > 0
-                            else np.nan
-                        ),
-                        "fold_scores": fold_scores,
-                    }
-                )
-
-    return pd.DataFrame(records)
-
-
 import re
 import numpy as np
 import matplotlib.pyplot as plt
@@ -488,123 +376,72 @@ def _epoch_to_numeric_x(epoch_label: str):
     return None  # post_feedback or anything else handled separately
 
 
-def plot_module_specificity(records_df: pd.DataFrame):
-    targets = records_df["target"].unique()
-    fig, axes = plt.subplots(
-        1, len(targets), figsize=(5 * len(targets), 4), sharey=True
-    )
-    if len(targets) == 1:
-        axes = [axes]
+def decode_module_specificity(
+    r_v,
+    r_c,
+    r_p,
+    meta_df,
+    trace_len,
+    epoch_fracs=(0.2, 0.5, 0.8, 1.0),
+    t_iti=None,
+    cv=5,
+    n_shuffles=20,
+):
+    n_trials = r_v.shape[0]
+    rt = meta_df["rt"].values
+    signed_stim = (meta_df["stim_side"] * meta_df["contrast"]).values
+    choice = meta_df["choice"].values
+    block_label = (meta_df["block_bias"] > 0.5).astype(int).values
+    committed = (meta_df["timed_out"] == 0).values
 
+    modules = {"V": r_v, "C": r_c, "P": r_p}
+    records = []
+
+    for frac in epoch_fracs:
+        epoch_name = f"decision_{int(frac*100)}pct"
+        t_idx = np.clip((rt * frac).astype(int), 0, None)
+        t_idx = np.minimum(t_idx, trace_len.astype(int) - 1)
+
+        for target_name, y, task in [
+            ("stimulus", signed_stim, "regression"),
+            ("choice", choice, "classification"),
+            ("prior_block", block_label, "classification"),
+        ]:
+            for module_name, r in modules.items():
+                X = r[np.arange(n_trials), t_idx, :]
+                real, null_mean, null_std, fold_scores = _cv_score(
+                    X[committed], y[committed], task, cv, n_shuffles
+                )
+                records.append(
+                    {
+                        "epoch": epoch_name,
+                        "module": module_name,
+                        "target": target_name,
+                        "score": real,
+                        "null_mean": null_mean,
+                        "null_std": null_std,
+                        "fold_scores":fold_scores
+                    }
+                )
+    return pd.DataFrame(records)
+
+
+def plot_module_specificity(records_df):
+    targets = records_df["target"].unique()
+    fig, axes = plt.subplots(1, len(targets), figsize=(5 * len(targets), 4))
+    colors = {"V": "tab:blue", "C": "tab:orange", "P": "tab:green"}
     for ax, target in zip(axes, targets):
         sub = records_df[records_df["target"] == target]
-        epochs = list(sub["epoch"].unique())
-
-        decision_epochs = [e for e in epochs if _epoch_to_numeric_x(e) is not None]
-        decision_epochs.sort(key=_epoch_to_numeric_x)
-        has_post_feedback = "post_feedback" in epochs
-
-        x_decision = [_epoch_to_numeric_x(e) for e in decision_epochs]
-        # place post_feedback at a fixed visual gap beyond the last decision point,
-        # rather than implying it's "110pct" on the same continuous scale
-        x_post = max(x_decision) + 25 if x_decision else 0
-
-        for module, color in [("VISp", "tab:blue"), ("MOs", "tab:orange")]:
-            msub = sub[sub["module"] == module].set_index("epoch")
-
-            y_decision = msub.loc[decision_epochs, "score"].values
-            null_mean = msub.loc[decision_epochs, "null_mean"].values
-            null_std = msub.loc[decision_epochs, "null_std"].values
-
-            ax.plot(x_decision, y_decision, marker="o", color=color, label=module)
-            ax.fill_between(
-                x_decision,
-                null_mean - null_std,
-                null_mean + null_std,
-                color=color,
-                alpha=0.15,
-            )
-
-            if has_post_feedback:
-                y_pf = msub.loc["post_feedback", "score"]
-                null_mean_pf = msub.loc["post_feedback", "null_mean"]
-                null_std_pf = msub.loc["post_feedback", "null_std"]
-                ax.scatter([x_post], [y_pf], color=color, marker="s", s=50, zorder=3)
-                ax.errorbar(
-                    [x_post],
-                    [null_mean_pf],
-                    yerr=[null_std_pf],
-                    color=color,
-                    alpha=0.3,
-                    capsize=3,
-                )
-
-        if has_post_feedback:
-            ax.axvline(
-                (max(x_decision) + x_post) / 2 if x_decision else x_post - 12,
-                color="gray",
-                lw=0.7,
-                ls=":",
-            )
-
-        xticks = x_decision + ([x_post] if has_post_feedback else [])
-        xticklabels = [f"{x}%" for x in x_decision] + (
-            ["post\nfeedback"] if has_post_feedback else []
-        )
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(xticklabels, rotation=30, ha="right")
-        ax.set_xlabel(
-            "% of decision phase" + (" | post-feedback" if has_post_feedback else "")
-        )
+        epochs = sorted(sub["epoch"].unique())
+        for module, color in colors.items():
+            msub = sub[sub["module"] == module].set_index("epoch").loc[epochs]
+            ax.plot(epochs, msub["score"], marker="o", color=color, label=module)
         ax.set_title(target)
+        ax.tick_params(axis="x", rotation=30)
         ax.legend(fontsize=8)
-
     fig.tight_layout()
     return fig
 
 
 if __name__ == "__main__":
     store = zarr.open("posthoc_single_session.zarr", mode="r")
-    meta_df = pd.DataFrame(
-        {
-            f: store[f][:]
-            for f in store.array_keys()
-            if f not in ("full_r_v", "full_r_m", "full_x_stim")
-        }
-    )
-    r_v = store["full_r_v"][:]
-    r_m = store["full_r_m"][:]
-    trace_len = meta_df["trace_len"].values
-
-    fig1 = plot_accuracy_by_contrast_congruency(meta_df)
-    fig2, rt_summary = plot_rt_distributions(meta_df, dt_ms=10.0, by="contrast")
-    fig3 = plot_rt_vs_contrast(meta_df, dt_ms=10.0)
-    fig4, psych_params = fit_psychometric(meta_df, split_by_block=True)
-
-    records = decode_module_specificity(
-        r_v, r_m, meta_df, trace_len, epoch_fracs=(0.2, 0.5, 0.8, 1.0), t_iti=10
-    )
-    fig5 = plot_module_specificity(records)
-
-    paths = run_and_save_multi_session(
-        model,
-        plan_gen,
-        device,
-        cfg.env,
-        cfg.decision,
-        out_dir="./runs/data/multi_session",
-        n_sessions=20,
-    )
-
-    meta_df, r_v, r_m = load_and_pool_sessions(paths)
-    trace_len = meta_df["trace_len"].values
-
-    records = decode_module_specificity(
-        r_v,
-        r_m,
-        meta_df,
-        trace_len,
-        epoch_fracs=(0.2, 0.5, 0.8, 1.0),
-        t_iti=cfg.env.T_iti,
-    )
-    fig = plot_module_specificity(records)

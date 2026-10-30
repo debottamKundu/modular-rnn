@@ -52,17 +52,6 @@ def validate_config_consistency(cfg):
             f"since env.kappa_kernel=0.0 (action kernel disabled)."
         )
 
-    if cfg.model.fb_mode == "sparse" and not (0.0 < cfg.model.fb_sparsity < 1.0):
-        raise ValueError(
-            f"model.fb_mode='sparse' requires 0 < fb_sparsity < 1, got {cfg.model.fb_sparsity}"
-        )
-
-    if cfg.model.fb_mode != "sparse" and cfg.model.fb_sparsity != 1.0:
-        print(
-            f"WARNING: model.fb_sparsity={cfg.model.fb_sparsity} has no effect "
-            f"since model.fb_mode='{cfg.model.fb_mode}' (only used when fb_mode='sparse')."
-        )
-
     valid_timings = {"pulse_only", "persist_iti", "persist_iti_and_decision"}
     assert (
         cfg.env.reward_timing in valid_timings
@@ -71,10 +60,30 @@ def validate_config_consistency(cfg):
         cfg.env.kernel_timing in valid_timings
     ), f"invalid env.kernel_timing: {cfg.env.kernel_timing}"
 
-    valid_fb_modes = {"dense", "zero", "sparse", "lowrank"}
-    assert (
-        cfg.model.fb_mode in valid_fb_modes
-    ), f"invalid model.fb_mode: {cfg.model.fb_mode}"
+    assert (cfg.env.kappa_kernel != 0.0) == (
+        cfg.model.n_fb == 2
+    ), f"env.kappa_kernel={cfg.env.kappa_kernel} requires model.n_fb=2, got {cfg.model.n_fb}"
+
+    valid_modes = {"dense", "sparse", "zero", "lowrank"}
+    conn_fields = [
+        "conn_c_from_v",
+        "conn_v_from_c",
+        "conn_p_from_v",
+        "conn_v_from_p",
+        "conn_p_from_c",
+        "conn_c_from_p",
+    ]
+    for name in conn_fields:
+        spec = getattr(cfg.model, name)
+        assert spec.mode in valid_modes, f"model.{name}.mode invalid: {spec.mode}"
+        if spec.mode == "sparse":
+            assert 0.0 < spec.sparsity < 1.0, f"model.{name}.sparsity must be in (0,1)"
+        if spec.mode == "lowrank":
+            assert spec.rank > 0, f"model.{name}.rank must be > 0"
+
+    valid_timings = {"pulse_only", "persist_iti", "persist_iti_and_decision"}
+    assert cfg.env.reward_timing in valid_timings
+    assert cfg.env.kernel_timing in valid_timings
 
 
 def log_run_to_registry(cfg, run_id, registry_path="./runs/registry.csv"):
@@ -84,11 +93,8 @@ def log_run_to_registry(cfg, run_id, registry_path="./runs/registry.csv"):
         "run_id": run_id,
         "kappa_kernel": cfg.env.kappa_kernel,
         "xi_kernel": cfg.env.xi_kernel,
-        "fb_mode": cfg.model.fb_mode,
-        "fb_sparsity": cfg.model.fb_sparsity,
         "reward_timing": cfg.env.reward_timing,
         "kernel_timing": cfg.env.kernel_timing,
-        "rank_ff": cfg.model.rank_ff,
         "theta": cfg.decision.theta,
         "n_steps": cfg.training.n_steps,
         "iti": cfg.env.T_iti,

@@ -50,8 +50,9 @@ class HiddenStateStore:
     def __init__(
         self,
         path,
-        n_visp,
-        n_mos,
+        n_v,
+        n_c,
+        n_p,
         n_stim,
         store_full_traces=False,
         chunk_trials=256,
@@ -67,7 +68,12 @@ class HiddenStateStore:
             )
 
         if store_full_traces:
-            trace_specs = {"full_r_v": n_visp, "full_r_m": n_mos, "full_x_stim": n_stim}
+            trace_specs = {
+                "full_r_v": n_v,
+                "full_r_c": n_c,
+                "full_r_p": n_p,
+                "full_x_stim": n_stim,
+            }
             for key, n_units in trace_specs.items():
                 _create_array(
                     self.store,
@@ -80,10 +86,11 @@ class HiddenStateStore:
     def append(self, result, training_step):
         B = result.z_c.shape[0]
         rt_np = result.rt.cpu().numpy().astype("f4")
-        if self.t_iti is not None:
-            trace_len = rt_np + 1 + self.t_iti
-        else:
-            trace_len = np.full(B, np.nan, dtype="f4")
+        trace_len = (
+            (rt_np + 1 + self.t_iti)
+            if self.t_iti is not None
+            else np.full(B, np.nan, dtype="f4")
+        )
 
         scalars = {
             "training_step": np.full(B, training_step, dtype="f4"),
@@ -96,7 +103,7 @@ class HiddenStateStore:
             "correct_label": result.correct_label.cpu().numpy().astype("f4"),
             "choice": result.choice.cpu().numpy().astype("f4"),
             "reward": result.reward.cpu().numpy().astype("f4"),
-            "rt": result.rt.cpu().numpy().astype("f4"),
+            "rt": rt_np,
             "timed_out": result.timed_out.cpu().numpy().astype("f4"),
             "prev_model_choice": result.prev_model_choice.cpu().numpy().astype("f4"),
             "has_prev_choice": result.has_prev_choice.cpu().numpy().astype("f4"),
@@ -108,13 +115,13 @@ class HiddenStateStore:
 
         if self.store_full_traces:
             self._append_trace("full_r_v", result.full_r_v)
-            self._append_trace("full_r_m", result.full_r_m)
+            self._append_trace("full_r_c", result.full_r_c)
+            self._append_trace("full_r_p", result.full_r_p)
             self._append_trace("full_x_stim", result.full_x_stim)
 
     def _append_trace(self, key, tensor):
-        arr = tensor.detach().cpu().numpy().astype("f4")  # (B, T, n_units)
+        arr = tensor.detach().cpu().numpy().astype("f4")
         ds = self.store[key]
         if ds.shape[1] == 0:
-            # first write: fix the time-axis size before appending along trial axis
             ds.resize((ds.shape[0], arr.shape[1], ds.shape[2]))
         _append_along_axis(ds, arr, axis=0)

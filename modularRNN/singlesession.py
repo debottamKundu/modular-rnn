@@ -39,17 +39,26 @@ def run_and_save_single_session(
     print(f"(5 blocks, lengths={env.plan['block_id']})")
 
     max_len = env_cfg.T_max + env_cfg.T_iti
+    # store = HiddenStateStore(
+    #     out_path,
+    #     model.n_visp,
+    #     model.n_mos,
+    #     model.n_stim,
+    #     store_full_traces=True,
+    #     t_iti=env_cfg.T_iti,
+    # )
     store = HiddenStateStore(
-        out_path,
-        model.n_visp,
-        model.n_mos,
-        model.n_stim,
+        path=out_path,
+        n_v=model.n_v,
+        n_c=model.n_c,
+        n_p=model.n_p,
+        n_stim=model.n_stim,
         store_full_traces=True,
         t_iti=env_cfg.T_iti,
     )
 
     model.eval()
-    buf_r_v, buf_r_m, buf_x_stim = [], [], []
+    buf_r_v, buf_r_c, buf_r_p, buf_x_stim = [], [], [], []
     pending_result = None
     n_saved = 0
     stop_at = max_trials if max_trials is not None else session_total_trials
@@ -61,11 +70,13 @@ def run_and_save_single_session(
         )
 
         while n_saved < min(session_total_trials, stop_at):
-            res, r_v, r_m, x_stim = env.step_dt(
+            res, r_v, r_c, r_p, x_stim = env.step_dt(
                 teacher_forcing_prob=teacher_forcing_prob, return_hidden=True
-            )
+            )  # type: ignore
             buf_r_v.append(r_v[0])
-            buf_r_m.append(r_m[0])
+            buf_r_c.append(r_c[0])
+            buf_r_p.append(r_p[0])
+
             buf_x_stim.append(x_stim[0])
             if res is not None:
                 pending_result = res
@@ -82,27 +93,33 @@ def run_and_save_single_session(
                 trace_len = len(buf_r_v)
                 pad = max_len - trace_len
                 r_v_arr = torch.stack(buf_r_v, dim=0)
-                r_m_arr = torch.stack(buf_r_m, dim=0)
+                r_c_arr = torch.stack(buf_r_c, dim=0)
+                r_p_arr = torch.stack(buf_r_p, dim=0)
                 x_stim_arr = torch.stack(buf_x_stim, dim=0)
                 if pad > 0:
                     r_v_arr = torch.cat(
-                        [r_v_arr, torch.zeros(pad, model.n_visp, device=device)], dim=0
+                        [r_v_arr, torch.zeros(pad, model.n_v, device=device)], dim=0
                     )
-                    r_m_arr = torch.cat(
-                        [r_m_arr, torch.zeros(pad, model.n_mos, device=device)], dim=0
+                    r_c_arr = torch.cat(
+                        [r_c_arr, torch.zeros(pad, model.n_c, device=device)], dim=0
                     )
+                    r_p_arr = torch.cat(
+                        [r_p_arr, torch.zeros(pad, model.n_p, device=device)], dim=0
+                    )
+
                     x_stim_arr = torch.cat(
                         [x_stim_arr, torch.zeros(pad, model.n_stim, device=device)],
                         dim=0,
                     )
 
                 pending_result.full_r_v = r_v_arr.unsqueeze(0)
-                pending_result.full_r_m = r_m_arr.unsqueeze(0)
+                pending_result.full_r_c = r_c_arr.unsqueeze(0)
+                pending_result.full_r_p = r_p_arr.unsqueeze(0)
                 pending_result.full_x_stim = x_stim_arr.unsqueeze(0)
 
                 store.append(pending_result, training_step=-1)
                 n_saved += 1
-                buf_r_v, buf_r_m, buf_x_stim = [], [], []
+                buf_r_v, buf_r_c, buf_r_p, buf_x_stim = [], [], [], []
                 pending_result = None
 
             prev_phase, prev_phase_step = new_phase, new_phase_step

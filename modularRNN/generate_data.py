@@ -2,8 +2,10 @@ import os
 import hydra
 import torch
 from omegaconf import OmegaConf
+
+from modularRNN.train import build_conn_specs
 from .conf.config import Config
-from .model import ModularCTRNN
+from .model import ModularCTRNN3
 from .env import AsyncClosedLoopEnv
 from .generators import SessionPlanGenerator
 from .storage import HiddenStateStore
@@ -21,24 +23,22 @@ def load_checkpoint(ckpt_path, device, fallback_config_path=None):
             f"{ckpt_path} has no embedded config and no fallback_config_path given -- "
             "fetch it from wandb first via fetch_and_save_config(...)."
         )
-    model = ModularCTRNN(
-        n_visp=cfg.model.n_visp,
-        n_mos=cfg.model.n_mos,
+    model = ModularCTRNN3(
+        n_v=cfg.model.n_v,
+        n_c=cfg.model.n_c,
+        n_p=cfg.model.n_p,
         n_stim=cfg.model.n_stim,
         n_fb=cfg.model.n_fb,
-        rank_ff=cfg.model.rank_ff,
         dt=cfg.model.dt,
-        tau_visp_range=cfg.model.tau_visp_range,
-        tau_mos_range=cfg.model.tau_mos_range,
+        tau_v_range=cfg.model.tau_v_range,
+        tau_c_range=cfg.model.tau_c_range,
+        tau_p_range=cfg.model.tau_p_range,
         learnable_tau=cfg.model.learnable_tau,
         rec_gain=cfg.model.rec_gain,
-        ff_gain=cfg.model.ff_gain,
-        fb_gain=cfg.model.fb_gain,
         in_gain=cfg.model.in_gain,
         sigma_baseline=cfg.model.sigma_baseline,
         nonlinearity=cfg.model.nonlinearity,
-        fb_mode=cfg.model.fb_mode,
-        fb_sparsity=cfg.model.fb_sparsity,
+        conn_specs=build_conn_specs(cfg),
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()

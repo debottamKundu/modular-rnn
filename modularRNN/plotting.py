@@ -111,6 +111,7 @@ def plot_psychometric(meta_df):
     ax[ax_idx].set_xticklabels([f"{t / 100:g}" for t in tick_pos], rotation=90)
     ax[ax_idx].legend()
     sns.despine()
+    plt.show()
 
     return saved_parameters, ax
 
@@ -257,70 +258,92 @@ def pretty_plot(decode_results):
     decode_stimulus = decode_results[decode_results["target"] == "stimulus"]
     decode_choice = decode_results[decode_results["target"] == "choice"]
     decode_prior = decode_results[decode_results["target"] == "prior_block"]
-    fig, ax = plt.subplots(figsize=(15, 5), ncols=3,sharex=True)
+    fig, ax = plt.subplots(figsize=(15, 5), ncols=3, sharex=True)
 
-    visp_stimulus = decode_stimulus[decode_stimulus["module"] == "VISp"]
-    mos_stimulus = decode_stimulus[decode_stimulus["module"] == "MOs"]
+    visp_stimulus = decode_stimulus[decode_stimulus["module"] == "v".upper()]
+    mos_stimulus = decode_stimulus[decode_stimulus["module"] == "c".upper()]
+    pfc_stimulus = decode_stimulus[decode_stimulus["module"] == "p".upper()]
+
     ax[0].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         visp_stimulus.score,
         yerr=np.std(np.stack(visp_stimulus.fold_scores.values), axis=1),
         label="VISp",
     )
     ax[0].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         mos_stimulus.score,
         yerr=np.std(np.stack(mos_stimulus.fold_scores.values), axis=1),
         label="MOs",
     )
+    ax[0].errorbar(
+        np.arange(len(visp_stimulus.score)),
+        pfc_stimulus.score,
+        yerr=np.std(np.stack(pfc_stimulus.fold_scores.values), axis=1),
+        label="PFC",
+    )
 
     ax[0].set_ylabel("$R^2$")
     ax[0].set_ylim(0, 1)
-    ax[0].set_xticks(np.arange(5), labels=(0, 0.2, 0.5, 0.8, 1))
+    ax[0].set_xticks(np.arange(len(visp_stimulus.score)), labels=(0.2, 0.5, 0.8, 1))
     ax[0].legend(frameon=False)
     ax[0].set_title("Stimulus Decoding")
     sns.despine()
 
-    visp_choice = decode_choice[decode_choice["module"] == "VISp"]
-    mos_choice = decode_choice[decode_choice["module"] == "MOs"]
+    visp_choice = decode_choice[decode_choice["module"] == "v".upper()]
+    mos_choice = decode_choice[decode_choice["module"] == "c".upper()]
+    pfc_choice = decode_choice[decode_choice["module"] == "p".upper()]
     ax[1].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         visp_choice.score,
         yerr=np.std(np.stack(visp_choice.fold_scores.values), axis=1),
         label="VISp",
     )
     ax[1].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         mos_choice.score,
-        yerr=np.std(np.stack(mos_stimulus.fold_scores.values), axis=1),
+        yerr=np.std(np.stack(mos_choice.fold_scores.values), axis=1),
         label="MOs",
+    )
+    ax[1].errorbar(
+        np.arange(len(visp_stimulus.score)),
+        pfc_choice.score,
+        yerr=np.std(np.stack(pfc_choice.fold_scores.values), axis=1),
+        label="PFC",
     )
 
     ax[1].set_ylabel("Accuracy")
     ax[1].set_ylim(0, 1)
-    ax[1].set_xticks(np.arange(5), labels=(0, 0.2, 0.5, 0.8, 1))
+    ax[1].set_xticks(np.arange(len(visp_stimulus.score)), labels=(0.2, 0.5, 0.8, 1))
     ax[1].legend(frameon=False)
     ax[1].set_title("Choice Decoding")
 
-    visp_prior = decode_prior[decode_prior["module"] == "VISp"]
-    mos_prior = decode_prior[decode_prior["module"] == "MOs"]
+    visp_prior = decode_prior[decode_prior["module"] == "v".upper()]
+    mos_prior = decode_prior[decode_prior["module"] == "c".upper()]
+    pfc_prior = decode_prior[decode_prior["module"] == "p".upper()]
     ax[2].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         visp_prior.score,
         yerr=np.std(np.stack(visp_prior.fold_scores.values), axis=1),
         label="VISp",
     )
     ax[2].errorbar(
-        np.arange(5),
+        np.arange(len(visp_stimulus.score)),
         mos_prior.score,
         yerr=np.std(np.stack(mos_stimulus.fold_scores.values), axis=1),
         label="MOs",
     )
+    ax[2].errorbar(
+        np.arange(len(visp_stimulus.score)),
+        pfc_prior.score,
+        yerr=np.std(np.stack(pfc_stimulus.fold_scores.values), axis=1),
+        label="PFC",
+    )
 
     ax[2].set_ylabel("Accuracy")
     ax[2].set_ylim(0, 1)
-    ax[2].set_xticks(np.arange(5), labels=(0, 0.2, 0.5, 0.8, 1))
+    ax[2].set_xticks(np.arange(len(visp_stimulus.score)), labels=(0.2, 0.5, 0.8, 1))
     ax[2].legend(frameon=False)
     ax[2].set_title("True Block Decoding")
     for idx in range(3):
-        ax[idx].set_xlabel('Time from Decision')
+        ax[idx].set_xlabel("Time from Decision")

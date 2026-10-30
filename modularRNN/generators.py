@@ -48,6 +48,9 @@ class SessionPlanGenerator:
             accept = unresolved & valid
             lengths[accept] = draws[accept]
             unresolved &= ~accept
+
+        # HACK: set lengths]0] to constant
+        lengths[0] = 50
         return lengths
 
     def _sample_bias_seq(self, n):
